@@ -41,6 +41,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="AIChat\AiChatCommandParserTests.cs" />
     <Compile Include="Analyzers\ExportAnalyzerAttributeTests.cs" />
     <Compile Include="Analyzers\AnalyzerScopeTests.cs" />
     <Compile Include="Analyzers\MemberImplementsInterfaceAnalyzerTests.cs" />
