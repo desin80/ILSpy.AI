@@ -17,6 +17,9 @@
 // DEALINGS IN THE SOFTWARE.
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using System.Xml.Linq;
 
 using ICSharpCode.ILSpyX.Settings;
@@ -36,6 +39,10 @@ namespace ICSharpCode.ILSpy.AIChat
 		private string? codexCliPath = "codex";
 		private string? codexCliArguments = string.Empty;
 		private bool sendOnEnter;
+		private bool autoModeEnabled;
+		private XElement sessionsElement = new("Sessions");
+		private int historyStateVersion;
+		private int lastActiveSessionId;
 
 		public AiChatProviderKind Provider {
 			get => provider;
@@ -87,18 +94,98 @@ namespace ICSharpCode.ILSpy.AIChat
 			set => SetProperty(ref sendOnEnter, value);
 		}
 
+		public bool AutoModeEnabled {
+			get => autoModeEnabled;
+			set => SetProperty(ref autoModeEnabled, value);
+		}
+
+		public int LastActiveSessionId {
+			get => lastActiveSessionId;
+			set => SetProperty(ref lastActiveSessionId, value);
+		}
+
 		public XName SectionName => "AiChatSettings";
 
 		public void LoadFromXml(XElement section)
 		{
 			SendOnEnter = (bool?)section.Attribute(nameof(SendOnEnter)) ?? false;
+			AutoModeEnabled = (bool?)section.Attribute(nameof(AutoModeEnabled)) ?? false;
+			LastActiveSessionId = (int?)section.Attribute(nameof(LastActiveSessionId)) ?? 0;
+			sessionsElement = section.Element("Sessions") is XElement sessions
+				? new XElement(sessions)
+				: new XElement("Sessions");
 		}
 
 		public XElement SaveToXml()
 		{
 			var section = new XElement(SectionName);
 			section.SetAttributeValue(nameof(SendOnEnter), SendOnEnter);
+			section.SetAttributeValue(nameof(AutoModeEnabled), AutoModeEnabled);
+			section.SetAttributeValue(nameof(LastActiveSessionId), LastActiveSessionId);
+			section.Add(new XElement(sessionsElement));
 			return section;
+		}
+
+		public IReadOnlyList<AiChatSession> LoadPersistedSessions()
+		{
+			var result = new List<AiChatSession>();
+			foreach (var sessionElement in sessionsElement.Elements("Session"))
+			{
+				var id = (int?)sessionElement.Attribute("Id") ?? 0;
+				var title = (string?)sessionElement.Attribute("Title") ?? "New chat";
+
+				var session = new AiChatSession {
+					Id = id,
+					Title = title,
+				};
+
+				foreach (var messageElement in sessionElement.Elements("Message"))
+				{
+					var messageId = (long?)messageElement.Attribute("Id") ?? 0;
+					var roleText = (string?)messageElement.Attribute("Role");
+					if (!Enum.TryParse(roleText, out AiChatMessageRole role))
+						role = AiChatMessageRole.Assistant;
+
+					var timestampText = (string?)messageElement.Attribute("Timestamp") ?? string.Empty;
+					var timestamp = DateTime.Now;
+					if (DateTime.TryParseExact(timestampText, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed))
+						timestamp = parsed;
+
+					var text = messageElement.Element("Text")?.Value ?? string.Empty;
+					session.Messages.Add(new AiChatMessage {
+						Id = messageId,
+						Role = role,
+						Text = text,
+						Timestamp = timestamp,
+					});
+				}
+
+				result.Add(session);
+			}
+
+			return result;
+		}
+
+		public void SavePersistedSessions(IEnumerable<AiChatSession> sessions)
+		{
+			sessionsElement = new XElement("Sessions",
+				sessions.Select(session =>
+					new XElement("Session",
+						new XAttribute("Id", session.Id),
+						new XAttribute("Title", session.Title ?? "New chat"),
+						session.Messages.Select(message =>
+							new XElement("Message",
+								new XAttribute("Id", message.Id),
+								new XAttribute("Role", message.Role),
+								new XAttribute("Timestamp", message.Timestamp.ToString("o", CultureInfo.InvariantCulture)),
+								new XElement("Text", message.Text ?? string.Empty))))));
+
+			HistoryStateVersion++;
+		}
+
+		private int HistoryStateVersion {
+			get => historyStateVersion;
+			set => SetProperty(ref historyStateVersion, value);
 		}
 	}
 }

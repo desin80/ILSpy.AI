@@ -34,6 +34,18 @@ namespace ICSharpCode.ILSpy.AIChat
 	[Shared]
 	public sealed class AiChatCodexClient
 	{
+		private static TimeSpan AskTimeout {
+			get {
+				var configured = Environment.GetEnvironmentVariable("ILSPY_CODEX_TIMEOUT_SECONDS");
+				if (int.TryParse(configured, out var seconds) && seconds > 0)
+				{
+					return TimeSpan.FromSeconds(seconds);
+				}
+
+				return TimeSpan.FromMinutes(3);
+			}
+		}
+
 		public async Task<string> ConnectivityTestAsync(CancellationToken cancellationToken)
 		{
 			var prompt = "Return exactly this text and nothing else: CODEx_OK";
@@ -64,77 +76,140 @@ namespace ICSharpCode.ILSpy.AIChat
 				return "Prompt is empty.";
 			}
 
-			var executable = GetCodexExecutable();
-			var arguments = BuildArguments();
-
-			var psi = new ProcessStartInfo {
-				FileName = executable,
-				Arguments = arguments,
-				UseShellExecute = false,
-				RedirectStandardInput = true,
-				RedirectStandardOutput = true,
-				RedirectStandardError = true,
-				StandardInputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-				StandardOutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-				StandardErrorEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-				CreateNoWindow = true,
-			};
-
-			using var process = new Process { StartInfo = psi };
+			Process? process = null;
+			var askTimeout = AskTimeout;
 			try
 			{
-				process.Start();
-			}
-			catch (Exception ex)
-			{
-				return $"Failed to start Codex CLI '{executable}': {ex.Message}";
-			}
+				using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+				timeoutCts.CancelAfter(askTimeout);
+				var token = timeoutCts.Token;
 
-			await process.StandardInput.WriteAsync(prompt.AsMemory(), cancellationToken);
-			await process.StandardInput.FlushAsync();
-			process.StandardInput.Close();
+				var executable = GetCodexExecutable();
+				var arguments = BuildArguments();
 
-			var outputBuilder = new StringBuilder();
-			var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+				var psi = new ProcessStartInfo {
+					FileName = executable,
+					Arguments = arguments,
+					UseShellExecute = false,
+					RedirectStandardInput = true,
+					RedirectStandardOutput = true,
+					RedirectStandardError = true,
+					StandardInputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+					StandardOutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+					StandardErrorEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+					CreateNoWindow = true,
+				};
 
-			if (onPartialResponse == null)
-			{
-				outputBuilder.Append(await process.StandardOutput.ReadToEndAsync(cancellationToken));
-			}
-			else
-			{
-				char[] buffer = new char[1024];
-				while (true)
+				process = new Process { StartInfo = psi };
+				try
 				{
-					var count = await process.StandardOutput.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
-					if (count == 0)
-					{
-						break;
-					}
-
-					var chunk = new string(buffer, 0, count);
-					outputBuilder.Append(chunk);
-					await onPartialResponse(chunk);
+					process.Start();
 				}
+				catch (Exception ex)
+				{
+					return $"Failed to start Codex CLI '{executable}': {ex.Message}";
+				}
+
+				await process.StandardInput.WriteAsync(prompt.AsMemory(), token);
+				await process.StandardInput.FlushAsync();
+				process.StandardInput.Close();
+
+				var outputBuilder = new StringBuilder();
+				var errorTask = process.StandardError.ReadToEndAsync(token);
+				var hasReceivedOutput = 0;
+
+				using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+				Task? heartbeatTask = null;
+				if (onPartialResponse != null)
+				{
+					heartbeatTask = Task.Run(async () =>
+					{
+						try
+						{
+							var frame = 0;
+							var frames = new[] { "waiting for response.", "waiting for response..", "waiting for response..." };
+							while (!heartbeatCts.Token.IsCancellationRequested && Interlocked.CompareExchange(ref hasReceivedOutput, 0, 0) == 0)
+							{
+								await Task.Delay(TimeSpan.FromSeconds(2), heartbeatCts.Token);
+								if (heartbeatCts.Token.IsCancellationRequested || Interlocked.CompareExchange(ref hasReceivedOutput, 0, 0) != 0)
+									break;
+
+								await onPartialResponse($"{frames[frame]}\r");
+								frame = (frame + 1) % frames.Length;
+							}
+						}
+						catch (OperationCanceledException)
+						{
+							// expected when request completes or gets cancelled
+						}
+					}, CancellationToken.None);
+				}
+
+				if (onPartialResponse == null)
+				{
+					outputBuilder.Append(await process.StandardOutput.ReadToEndAsync(token));
+				}
+				else
+				{
+					char[] buffer = new char[1024];
+					while (true)
+					{
+						var count = await process.StandardOutput.ReadAsync(buffer.AsMemory(0, buffer.Length), token);
+						if (count == 0)
+						{
+							break;
+						}
+
+						Interlocked.Exchange(ref hasReceivedOutput, 1);
+						var chunk = new string(buffer, 0, count);
+						outputBuilder.Append(chunk);
+						await onPartialResponse(chunk);
+					}
+				}
+
+				heartbeatCts.Cancel();
+				if (heartbeatTask != null)
+				{
+					await heartbeatTask;
+				}
+
+				await process.WaitForExitAsync(token);
+				var error = (await errorTask)?.Trim() ?? string.Empty;
+				var output = outputBuilder.ToString().Trim();
+
+				if (process.ExitCode != 0)
+				{
+					return string.IsNullOrWhiteSpace(error)
+						? $"Codex CLI failed with exit code {process.ExitCode}."
+						: $"Codex CLI failed with exit code {process.ExitCode}.{Environment.NewLine}{error}";
+				}
+
+				if (!string.IsNullOrWhiteSpace(output))
+				{
+					return output;
+				}
+
+				return string.IsNullOrWhiteSpace(error) ? "Codex CLI returned no output." : error;
 			}
-
-			await process.WaitForExitAsync(cancellationToken);
-			var error = (await errorTask)?.Trim() ?? string.Empty;
-			var output = outputBuilder.ToString().Trim();
-
-			if (process.ExitCode != 0)
+			catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
 			{
-				return string.IsNullOrWhiteSpace(error)
-					? $"Codex CLI failed with exit code {process.ExitCode}."
-					: $"Codex CLI failed with exit code {process.ExitCode}.{Environment.NewLine}{error}";
-			}
+				try
+				{
+					if (process != null && !process.HasExited)
+					{
+						process.Kill(entireProcessTree: true);
+					}
+				}
+				catch
+				{
+				}
 
-			if (!string.IsNullOrWhiteSpace(output))
+				return $"Codex request timed out after {(int)askTimeout.TotalSeconds}s. You can retry, narrow the question, or reduce context.";
+			}
+			finally
 			{
-				return output;
+				process?.Dispose();
 			}
-
-			return string.IsNullOrWhiteSpace(error) ? "Codex CLI returned no output." : error;
 		}
 
 		private static string GetCodexExecutable()

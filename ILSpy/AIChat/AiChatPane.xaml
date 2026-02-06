@@ -10,59 +10,203 @@
              d:DesignWidth="360"
              d:DataContext="{d:DesignInstance chat:AiChatPaneModel}"
              viewModels:Pane.IsActive="{Binding IsActive}">
+	<UserControl.Resources>
+		<Style x:Key="AiChatPrimaryActionButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+			<Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}" />
+			<Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}" />
+			<Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}" />
+			<Setter Property="BorderThickness" Value="1" />
+			<Setter Property="FontWeight" Value="Normal" />
+			<Setter Property="Padding" Value="8,2" />
+			<Setter Property="FontSize" Value="12" />
+			<Style.Triggers>
+				<Trigger Property="IsEnabled" Value="False">
+					<Setter Property="Opacity" Value="0.85" />
+				</Trigger>
+				<Trigger Property="IsMouseOver" Value="True">
+					<Setter Property="Opacity" Value="0.95" />
+				</Trigger>
+			</Style.Triggers>
+		</Style>
+
+		<Style x:Key="AiChatInterruptButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+			<Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}" />
+			<Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.ControlDarkDarkBrushKey}}" />
+			<Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}" />
+			<Setter Property="BorderThickness" Value="1" />
+			<Setter Property="FontWeight" Value="Normal" />
+			<Setter Property="Padding" Value="8,2" />
+			<Setter Property="FontSize" Value="12" />
+		</Style>
+	</UserControl.Resources>
+
 	<Grid>
-		<Grid.RowDefinitions>
-			<RowDefinition Height="*" />
-			<RowDefinition Height="Auto" />
-			<RowDefinition Height="Auto" />
-		</Grid.RowDefinitions>
+		<Grid.Resources>
+			<Style x:Key="AiChatFlatButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+				<Setter Property="Padding" Value="6,1" />
+				<Setter Property="MinHeight" Value="22" />
+				<Setter Property="FontSize" Value="11" />
+				<Setter Property="FontWeight" Value="Normal" />
+			</Style>
+			<Style x:Key="AiChatFlatToggleButtonStyle" TargetType="ToggleButton" BasedOn="{StaticResource {x:Type ToggleButton}}">
+				<Setter Property="Padding" Value="6,1" />
+				<Setter Property="MinHeight" Value="22" />
+				<Setter Property="FontSize" Value="11" />
+				<Setter Property="FontWeight" Value="Normal" />
+			</Style>
+			<BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+		</Grid.Resources>
 
-		<ListBox x:Name="MessagesList"
-				 Grid.Row="0"
-				 ItemsSource="{Binding Messages}"
-				 HorizontalContentAlignment="Stretch"
-				 VirtualizingStackPanel.IsVirtualizing="False"
-				 ScrollViewer.CanContentScroll="False"
-				 ScrollViewer.VerticalScrollBarVisibility="Auto"
-				 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-				 BorderThickness="0"
+		<Grid Visibility="{Binding IsHistoryOpen, Converter={StaticResource BoolToVisibility}}" Margin="0,6,0,0">
+			<Grid.RowDefinitions>
+				<RowDefinition Height="Auto" />
+				<RowDefinition Height="*" />
+			</Grid.RowDefinitions>
+			<DockPanel Grid.Row="0" Margin="0,0,0,6" LastChildFill="False">
+				<Button Content="Back"
+						Command="{Binding CloseHistoryCommand}"
+						Style="{StaticResource AiChatFlatButtonStyle}"
+						MinWidth="56"
+						DockPanel.Dock="Left" />
+				<TextBlock Text="History" VerticalAlignment="Center" Margin="10,0,0,0" />
+				<Button Content="+"
+						Command="{Binding NewSessionCommand}"
+						Style="{StaticResource AiChatFlatButtonStyle}"
+						MinWidth="24"
+						DockPanel.Dock="Right"
+						Margin="0,0,4,0" />
+			</DockPanel>
+			<Border Grid.Row="1"
+					BorderBrush="{DynamicResource {x:Static SystemColors.ControlDarkBrushKey}}"
+					BorderThickness="1"
+					Background="{DynamicResource {x:Static SystemColors.ControlLightLightBrushKey}}">
+				<ScrollViewer VerticalScrollBarVisibility="Auto">
+					<ItemsControl ItemsSource="{Binding Sessions}">
+						<ItemsControl.ItemTemplate>
+							<DataTemplate DataType="{x:Type chat:AiChatSession}">
+								<DockPanel Margin="4,3,4,3" LastChildFill="True">
+									<Button Content="x"
+											Command="{Binding DataContext.DeleteSessionCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+											CommandParameter="{Binding}"
+											Style="{StaticResource AiChatFlatButtonStyle}"
+											MinWidth="22"
+											DockPanel.Dock="Right"
+											Margin="6,0,0,0" />
+									<Button Content="{Binding Title}"
+											Command="{Binding DataContext.SelectSessionCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+											CommandParameter="{Binding}"
+											Style="{StaticResource AiChatFlatButtonStyle}"
+											HorizontalContentAlignment="Left"
+											MinWidth="170"
+											ToolTip="{Binding Title}" />
+								</DockPanel>
+							</DataTemplate>
+						</ItemsControl.ItemTemplate>
+					</ItemsControl>
+				</ScrollViewer>
+			</Border>
+		</Grid>
+
+		<Grid Margin="0,6,0,0">
+			<Grid.Style>
+				<Style TargetType="Grid">
+					<Setter Property="Visibility" Value="Visible" />
+					<Style.Triggers>
+						<DataTrigger Binding="{Binding IsHistoryOpen}" Value="True">
+							<Setter Property="Visibility" Value="Collapsed" />
+						</DataTrigger>
+					</Style.Triggers>
+				</Style>
+			</Grid.Style>
+			<Grid.RowDefinitions>
+				<RowDefinition Height="Auto" />
+				<RowDefinition Height="*" />
+				<RowDefinition Height="Auto" />
+				<RowDefinition Height="Auto" />
+			</Grid.RowDefinitions>
+			<DockPanel Grid.Row="0" Margin="0,0,0,6" LastChildFill="False">
+				<Button Content="+"
+						Command="{Binding NewSessionCommand}"
+						Style="{StaticResource AiChatFlatButtonStyle}"
+						MinWidth="24"
+						DockPanel.Dock="Right"
+						Margin="0,0,4,0" />
+				<Button Content="History"
+						Command="{Binding OpenHistoryCommand}"
+						Style="{StaticResource AiChatFlatButtonStyle}"
+						MinWidth="66"
+						DockPanel.Dock="Right"
+						Margin="0,0,6,0" />
+				<TextBlock Text="{Binding CurrentSessionTitle}" VerticalAlignment="Center" Margin="8,0,10,0" TextTrimming="CharacterEllipsis" />
+			</DockPanel>
+
+			<RichTextBox x:Name="TranscriptBox"
+				 Grid.Row="1"
+				 IsReadOnly="True"
+				 IsDocumentEnabled="True"
+				 BorderThickness="1"
+				 BorderBrush="{DynamicResource {x:Static SystemColors.ControlLightBrushKey}}"
+				 Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
+				 Foreground="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"
 				 Margin="0,0,0,6"
-				 Loaded="MessagesList_Loaded">
-			<ListBox.ItemTemplate>
-				<DataTemplate DataType="{x:Type chat:AiChatMessage}">
-					<Border Margin="2" Padding="6" HorizontalAlignment="Stretch" BorderBrush="{DynamicResource {x:Static SystemColors.ControlLightBrushKey}}" BorderThickness="1">
-						<TextBox Text="{Binding DisplayText, Mode=OneWay}"
-								 IsReadOnly="True"
-								 BorderThickness="0"
-								 Background="Transparent"
-								 IsTabStop="False"
-								 HorizontalAlignment="Stretch"
-								 MinWidth="0"
-								 TextWrapping="Wrap"
-								 AcceptsReturn="True"
-								 VerticalScrollBarVisibility="Disabled"
-								 HorizontalScrollBarVisibility="Disabled"
-								 SizeChanged="MessageTextBox_SizeChanged"
-								 PreviewMouseWheel="MessageTextBox_PreviewMouseWheel" />
-					</Border>
-				</DataTemplate>
-			</ListBox.ItemTemplate>
-		</ListBox>
+				 Padding="8,6"
+				 FontSize="12"
+				 VerticalScrollBarVisibility="Auto"
+				 HorizontalScrollBarVisibility="Disabled"
+				 Loaded="TranscriptBox_Loaded"
+				 SizeChanged="TranscriptBox_SizeChanged" />
 
-		<TextBox Grid.Row="1"
+			<TextBox Grid.Row="2"
 				 Margin="0,0,0,6"
 				 MinHeight="70"
 				 AcceptsReturn="True"
+				 Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
+				 Foreground="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"
+				 BorderBrush="{DynamicResource {x:Static SystemColors.ControlLightBrushKey}}"
 				 TextWrapping="Wrap"
 				 VerticalScrollBarVisibility="Auto"
 				 Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
 				 PreviewKeyDown="InputBox_PreviewKeyDown" />
 
-		<StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
-			<CheckBox Content="Enter to send" IsChecked="{Binding SendOnEnter, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0" />
-			<Button Content="Send" Command="{Binding SubmitCommand}" Margin="0,0,6,0" MinWidth="72" />
-			<Button Content="Cancel" Command="{Binding CancelCommand}" Margin="0,0,6,0" MinWidth="72" />
-			<Button Content="Clear" Command="{Binding ClearCommand}" MinWidth="72" />
-		</StackPanel>
+			<Grid Grid.Row="3">
+				<Grid.ColumnDefinitions>
+					<ColumnDefinition Width="*" />
+					<ColumnDefinition Width="Auto" />
+				</Grid.ColumnDefinitions>
+				<TextBlock x:Name="ExecutingStatusText" Grid.Column="0" Text="Executing..." VerticalAlignment="Center" Margin="6,0,12,0">
+					<TextBlock.Style>
+						<Style TargetType="TextBlock">
+							<Setter Property="Visibility" Value="Collapsed" />
+							<Style.Triggers>
+								<DataTrigger Binding="{Binding IsBusy}" Value="True">
+									<Setter Property="Visibility" Value="Visible" />
+								</DataTrigger>
+							</Style.Triggers>
+						</Style>
+					</TextBlock.Style>
+				</TextBlock>
+				<StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+					<CheckBox Content="Auto mode" IsChecked="{Binding AutoModeEnabled, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0" />
+					<CheckBox Content="Enter to send" IsChecked="{Binding SendOnEnter, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0" />
+					<Button Margin="0,0,6,0" MinWidth="78">
+						<Button.Style>
+							<Style TargetType="Button" BasedOn="{StaticResource AiChatPrimaryActionButtonStyle}">
+								<Setter Property="Content" Value="Send" />
+								<Setter Property="Command" Value="{Binding SubmitCommand}" />
+								<Style.Triggers>
+									<DataTrigger Binding="{Binding IsBusy}" Value="True">
+										<Setter Property="Content" Value="Interrupt" />
+										<Setter Property="Command" Value="{Binding CancelCommand}" />
+										<Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.ControlDarkDarkBrushKey}}" />
+										<Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.ControlLightLightBrushKey}}" />
+									</DataTrigger>
+								</Style.Triggers>
+							</Style>
+						</Button.Style>
+					</Button>
+					<Button Content="Clear" Command="{Binding ClearCommand}" MinWidth="66" Style="{StaticResource AiChatPrimaryActionButtonStyle}" />
+				</StackPanel>
+			</Grid>
+		</Grid>
 	</Grid>
 </UserControl>

@@ -31,7 +31,7 @@ namespace ICSharpCode.ILSpy.AIChat
 	[Shared]
 	public sealed class AiChatService
 	{
-		private const int MaxAutoSteps = 30;
+		private const int AutoStateMaxChunkLength = 2500;
 
 		private readonly AiChatToolDispatcher toolDispatcher;
 		private readonly AiChatCodexClient codexClient;
@@ -126,11 +126,12 @@ namespace ICSharpCode.ILSpy.AIChat
 
 			if (onProgress != null)
 			{
-				await onProgress("[status] Collecting ILSpy context...\n");
+				await onProgress("Collecting ILSpy context...\n");
 			}
 
 			var context = await toolDispatcher.ExecuteAsync("selected", null, null, null, cancellationToken);
 			var assemblyContext = await toolDispatcher.ExecuteAsync("assemblies", null, null, null, cancellationToken);
+			var decompileContext = await toolDispatcher.ExecuteAsync("decompile", null, null, null, cancellationToken);
 
 			var fullPrompt = new StringBuilder();
 			fullPrompt.AppendLine("You are an IL analysis assistant running inside ILSpy.");
@@ -140,6 +141,9 @@ namespace ICSharpCode.ILSpy.AIChat
 			fullPrompt.AppendLine("Current selection:");
 			fullPrompt.AppendLine(context.Output);
 			fullPrompt.AppendLine();
+			fullPrompt.AppendLine("Selected decompilation (if available):");
+			fullPrompt.AppendLine(decompileContext.Output);
+			fullPrompt.AppendLine();
 			fullPrompt.AppendLine("Loaded assemblies:");
 			fullPrompt.AppendLine(assemblyContext.Output);
 			fullPrompt.AppendLine();
@@ -148,7 +152,7 @@ namespace ICSharpCode.ILSpy.AIChat
 
 			if (onProgress != null)
 			{
-				await onProgress("[status] Sending request to Codex...\n");
+				await onProgress("Sending request to Codex...\n");
 			}
 
 			return await codexClient.AskAsync(fullPrompt.ToString(), onProgress, cancellationToken);
@@ -160,54 +164,78 @@ namespace ICSharpCode.ILSpy.AIChat
 			{
 				return "Usage: /auto <goal>";
 			}
-
-			var transcript = new StringBuilder();
 			var state = string.Empty;
+			var step = 0;
 
-			for (var step = 1; step <= MaxAutoSteps; step++)
+			while (true)
 			{
+				step++;
 				cancellationToken.ThrowIfCancellationRequested();
 
 				if (onProgress != null)
 				{
-					await onProgress($"[progress] Step {step}/{MaxAutoSteps}: planning next action...\n");
+					await onProgress($"\n=== Step {step} ===\n");
 				}
 
 				var prompt = BuildAutoPrompt(goal, state, step);
 				var response = await codexClient.AskAsync(prompt, cancellationToken);
+				var modelText = AiChatToolCallParser.RemoveToolCallBlock(response);
+				if (onProgress != null && !string.IsNullOrWhiteSpace(modelText))
+				{
+					await onProgress($"Thinking: {ToSingleLine(modelText, 260)}\n");
+				}
 
 				var toolCall = AiChatToolCallParser.Parse(response);
 				if (toolCall == null)
 				{
-					var cleaned = AiChatToolCallParser.RemoveToolCallBlock(response);
-					if (onProgress != null)
-					{
-						await onProgress($"[progress] Step {step}/{MaxAutoSteps}: model produced final answer.\n");
-					}
-					transcript.AppendLine($"[step {step}] assistant");
-					transcript.AppendLine(cleaned);
-					return transcript.ToString().Trim();
+					var cleaned = modelText;
+				if (onProgress != null)
+				{
+					await onProgress("Final answer generated.\n");
+				}
+
+					return string.IsNullOrWhiteSpace(cleaned)
+						? "Auto mode finished without a final response."
+						: cleaned.Trim();
 				}
 
 				if (onProgress != null)
 				{
-					await onProgress($"[progress] Step {step}/{MaxAutoSteps}: running tool '{toolCall.Name}'...\n");
+					await onProgress($"Tool call: {toolCall.Name}\n");
 				}
 
 				var toolResult = await toolDispatcher.ExecuteAsync(toolCall.Name, toolCall.Mode, toolCall.Term, toolCall.Index, cancellationToken);
 				if (onProgress != null)
 				{
-					await onProgress($"[progress] Step {step}/{MaxAutoSteps}: tool '{toolCall.Name}' finished.\n");
+					await onProgress($"Tool result ({toolCall.Name}):\n");
+					await onProgress($"{(string.IsNullOrWhiteSpace(toolResult.Output) ? "<empty>" : toolResult.Output)}\n");
 				}
 
-				transcript.AppendLine($"[step {step}] tool: {toolCall.Name}");
-				transcript.AppendLine(toolResult.Output);
+				if (!toolResult.Success)
+				{
+					return $"Tool '{toolCall.Name}' failed: {toolResult.Output}";
+				}
 
-				state += Environment.NewLine + $"Step {step} tool '{toolCall.Name}' result:" + Environment.NewLine + toolResult.Output;
+				var toolOutputForState = toolResult.Output;
+				if (toolOutputForState.Length > AutoStateMaxChunkLength)
+				{
+					toolOutputForState = toolOutputForState.Substring(0, AutoStateMaxChunkLength) + Environment.NewLine + "... [truncated for context budget]";
+				}
+
+				state += Environment.NewLine + $"Step {step} tool '{toolCall.Name}' result:" + Environment.NewLine + toolOutputForState;
 			}
+		}
 
-			transcript.AppendLine($"Reached max auto steps ({MaxAutoSteps}). Please refine your goal or continue with another /auto command.");
-			return transcript.ToString().Trim();
+		private static string ToSingleLine(string text, int maxLength)
+		{
+			if (string.IsNullOrWhiteSpace(text))
+				return "<empty>";
+
+			var normalized = text.Replace("\r", " ").Replace("\n", " ").Trim();
+			if (normalized.Length <= maxLength)
+				return normalized;
+
+			return normalized.Substring(0, maxLength) + "...";
 		}
 
 		private string BuildAutoPrompt(string goal, string state, int step)
