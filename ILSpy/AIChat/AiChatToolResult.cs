@@ -16,20 +16,14 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-using System.Composition;
-using System.Windows.Controls;
-
-using TomsToolbox.Wpf.Composition.AttributedModel;
-
 namespace ICSharpCode.ILSpy.AIChat
 {
-	[DataTemplate(typeof(AiChatSettingsViewModel))]
-	[NonShared]
-	public partial class AiChatSettingsPanel
+	#nullable enable
+
+	public sealed class AiChatToolResult
 	{
-		public AiChatSettingsPanel()
-		{
-			InitializeComponent();
-		}
+		public bool Success { get; init; }
+
+		public string Output { get; init; } = string.Empty;
 	}
 }

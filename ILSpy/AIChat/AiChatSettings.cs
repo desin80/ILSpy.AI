@@ -29,18 +29,17 @@ namespace ICSharpCode.ILSpy.AIChat
 
 	public sealed class AiChatSettings : ObservableObjectBase, ISettingsSection
 	{
-		private AiChatProviderKind provider = AiChatProviderKind.Disabled;
+		private AiChatProviderKind provider = AiChatProviderKind.CodexCli;
 		private string? openAIBaseUrl = "https://api.openai.com/v1";
 		private string? openAIModel = "gpt-4.1-mini";
 		private string? openAIApiKey = string.Empty;
 		private string? codexCliPath = "codex";
-		private string? codexCliArguments = "";
+		private string? codexCliArguments = string.Empty;
+		private bool sendOnEnter;
 
 		public AiChatProviderKind Provider {
 			get => provider;
-			set {
-				SetProperty(ref provider, value);
-			}
+			set => SetProperty(ref provider, value);
 		}
 
 		public string OpenAIBaseUrl {
@@ -83,37 +82,22 @@ namespace ICSharpCode.ILSpy.AIChat
 			}
 		}
 
+		public bool SendOnEnter {
+			get => sendOnEnter;
+			set => SetProperty(ref sendOnEnter, value);
+		}
+
 		public XName SectionName => "AiChatSettings";
 
 		public void LoadFromXml(XElement section)
 		{
-			if (Enum.TryParse((string?)section.Attribute(nameof(Provider)), out AiChatProviderKind providerKind))
-			{
-				Provider = providerKind;
-			}
-			else
-			{
-				Provider = AiChatProviderKind.Disabled;
-			}
-
-			OpenAIBaseUrl = (string?)section.Attribute(nameof(OpenAIBaseUrl)) ?? "https://api.openai.com/v1";
-			OpenAIModel = (string?)section.Attribute(nameof(OpenAIModel)) ?? "gpt-4.1-mini";
-			OpenAIApiKey = (string?)section.Attribute(nameof(OpenAIApiKey)) ?? string.Empty;
-			CodexCliPath = (string?)section.Attribute(nameof(CodexCliPath)) ?? "codex";
-			CodexCliArguments = (string?)section.Attribute(nameof(CodexCliArguments)) ?? string.Empty;
+			SendOnEnter = (bool?)section.Attribute(nameof(SendOnEnter)) ?? false;
 		}
 
 		public XElement SaveToXml()
 		{
 			var section = new XElement(SectionName);
-
-			section.SetAttributeValue(nameof(Provider), Provider);
-			section.SetAttributeValue(nameof(OpenAIBaseUrl), OpenAIBaseUrl);
-			section.SetAttributeValue(nameof(OpenAIModel), OpenAIModel);
-			section.SetAttributeValue(nameof(OpenAIApiKey), OpenAIApiKey);
-			section.SetAttributeValue(nameof(CodexCliPath), CodexCliPath);
-			section.SetAttributeValue(nameof(CodexCliArguments), CodexCliArguments);
-
+			section.SetAttributeValue(nameof(SendOnEnter), SendOnEnter);
 			return section;
 		}
 	}

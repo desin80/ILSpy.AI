@@ -11,38 +11,9 @@
 	<StackPanel Orientation="Vertical">
 		<GroupBox Header="AI Chat">
 			<StackPanel Margin="10">
-				<StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-					<TextBlock VerticalAlignment="Center" Width="80" Text="Provider:" />
-					<ComboBox Width="260"
-							  ItemsSource="{Binding ProviderItems}"
-							  SelectedValuePath="Kind"
-							  DisplayMemberPath="Name"
-							  SelectedValue="{Binding Settings.Provider, Mode=TwoWay}" />
-				</StackPanel>
-
-				<TextBlock FontWeight="SemiBold" Text="OpenAI-compatible" Margin="0,0,0,4" />
-				<StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-					<TextBlock VerticalAlignment="Center" Width="80" Text="Base URL:" />
-					<TextBox Width="520" Text="{Binding Settings.OpenAIBaseUrl, UpdateSourceTrigger=PropertyChanged}" />
-				</StackPanel>
-				<StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-					<TextBlock VerticalAlignment="Center" Width="80" Text="Model:" />
-					<TextBox Width="520" Text="{Binding Settings.OpenAIModel, UpdateSourceTrigger=PropertyChanged}" />
-				</StackPanel>
-				<StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-					<TextBlock VerticalAlignment="Center" Width="80" Text="API Key:" />
-					<PasswordBox x:Name="ApiKeyPasswordBox" Width="520" PasswordChanged="ApiKeyPasswordBox_PasswordChanged" />
-				</StackPanel>
-
-				<TextBlock FontWeight="SemiBold" Text="Codex CLI" Margin="0,8,0,4" />
-				<StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-					<TextBlock VerticalAlignment="Center" Width="80" Text="Path:" />
-					<TextBox Width="520" Text="{Binding Settings.CodexCliPath, UpdateSourceTrigger=PropertyChanged}" />
-				</StackPanel>
-				<StackPanel Orientation="Horizontal">
-					<TextBlock VerticalAlignment="Center" Width="80" Text="Arguments:" />
-					<TextBox Width="520" Text="{Binding Settings.CodexCliArguments, UpdateSourceTrigger=PropertyChanged}" />
-				</StackPanel>
+				<TextBlock TextWrapping="Wrap" Text="AI Chat uses your external Codex CLI configuration." />
+				<TextBlock Margin="0,6,0,0" TextWrapping="Wrap" Text="Install and configure Codex CLI normally (for example npm install -g @openai/codex), then run login/config in your terminal. ILSpy does not store provider/API settings." />
+				<TextBlock Margin="0,6,0,0" TextWrapping="Wrap" Text="Optional: set environment variable ILSPY_CODEX_CLI to override executable path (default: codex)." />
 			</StackPanel>
 		</GroupBox>
 	</StackPanel>

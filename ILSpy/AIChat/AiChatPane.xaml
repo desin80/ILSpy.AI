@@ -17,15 +17,33 @@
 			<RowDefinition Height="Auto" />
 		</Grid.RowDefinitions>
 
-		<ListBox Grid.Row="0"
+		<ListBox x:Name="MessagesList"
+				 Grid.Row="0"
 				 ItemsSource="{Binding Messages}"
 				 HorizontalContentAlignment="Stretch"
+				 VirtualizingStackPanel.IsVirtualizing="False"
+				 ScrollViewer.CanContentScroll="False"
+				 ScrollViewer.VerticalScrollBarVisibility="Auto"
+				 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
 				 BorderThickness="0"
-				 Margin="0,0,0,6">
+				 Margin="0,0,0,6"
+				 Loaded="MessagesList_Loaded">
 			<ListBox.ItemTemplate>
 				<DataTemplate DataType="{x:Type chat:AiChatMessage}">
-					<Border Margin="2" Padding="6" BorderBrush="{DynamicResource {x:Static SystemColors.ControlLightBrushKey}}" BorderThickness="1">
-						<TextBlock Text="{Binding DisplayText}" TextWrapping="Wrap" />
+					<Border Margin="2" Padding="6" HorizontalAlignment="Stretch" BorderBrush="{DynamicResource {x:Static SystemColors.ControlLightBrushKey}}" BorderThickness="1">
+						<TextBox Text="{Binding DisplayText, Mode=OneWay}"
+								 IsReadOnly="True"
+								 BorderThickness="0"
+								 Background="Transparent"
+								 IsTabStop="False"
+								 HorizontalAlignment="Stretch"
+								 MinWidth="0"
+								 TextWrapping="Wrap"
+								 AcceptsReturn="True"
+								 VerticalScrollBarVisibility="Disabled"
+								 HorizontalScrollBarVisibility="Disabled"
+								 SizeChanged="MessageTextBox_SizeChanged"
+								 PreviewMouseWheel="MessageTextBox_PreviewMouseWheel" />
 					</Border>
 				</DataTemplate>
 			</ListBox.ItemTemplate>
@@ -38,9 +56,10 @@
 				 TextWrapping="Wrap"
 				 VerticalScrollBarVisibility="Auto"
 				 Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
-				 KeyDown="InputBox_KeyDown" />
+				 PreviewKeyDown="InputBox_PreviewKeyDown" />
 
 		<StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+			<CheckBox Content="Enter to send" IsChecked="{Binding SendOnEnter, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0" />
 			<Button Content="Send" Command="{Binding SubmitCommand}" Margin="0,0,6,0" MinWidth="72" />
 			<Button Content="Cancel" Command="{Binding CancelCommand}" Margin="0,0,6,0" MinWidth="72" />
 			<Button Content="Clear" Command="{Binding ClearCommand}" MinWidth="72" />

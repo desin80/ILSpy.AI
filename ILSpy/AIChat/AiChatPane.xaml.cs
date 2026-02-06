@@ -17,28 +17,93 @@
 // DEALINGS IN THE SOFTWARE.
 
 using System.Composition;
+using System.Collections.Specialized;
+using System.Windows.Threading;
 using System.Windows.Controls;
+using System.Windows;
 using System.Windows.Input;
 
 using TomsToolbox.Wpf.Composition.AttributedModel;
 
 namespace ICSharpCode.ILSpy.AIChat
 {
+	#nullable enable
+
 	[DataTemplate(typeof(AiChatPaneModel))]
 	[NonShared]
 	public partial class AiChatPane
 	{
+		private AiChatPaneModel? observedModel;
+
 		public AiChatPane()
 		{
 			InitializeComponent();
+			DataContextChanged += AiChatPane_DataContextChanged;
 		}
 
-		private void InputBox_KeyDown(object sender, KeyEventArgs e)
+		private void AiChatPane_DataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
 		{
-			if (e.Key != Key.Enter || Keyboard.Modifiers != ModifierKeys.Control)
+			if (observedModel != null)
+			{
+				observedModel.Messages.CollectionChanged -= Messages_CollectionChanged;
+			}
+
+			observedModel = e.NewValue as AiChatPaneModel;
+			if (observedModel != null)
+			{
+				observedModel.Messages.CollectionChanged += Messages_CollectionChanged;
+			}
+		}
+
+		private void Messages_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+		{
+			if (e.Action != NotifyCollectionChangedAction.Add)
+				return;
+
+			ScrollMessagesToEnd();
+		}
+
+		private void MessagesList_Loaded(object sender, RoutedEventArgs e)
+		{
+			ScrollMessagesToEnd();
+		}
+
+		private void MessageTextBox_SizeChanged(object sender, SizeChangedEventArgs e)
+		{
+			if (e.WidthChanged)
+			{
+				ScrollMessagesToEnd();
+			}
+		}
+
+		private void ScrollMessagesToEnd()
+		{
+			Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+			{
+				if (MessagesList.Items.Count == 0)
+					return;
+
+				MessagesList.UpdateLayout();
+				MessagesList.ScrollIntoView(MessagesList.Items[MessagesList.Items.Count - 1]);
+			});
+		}
+
+		private void InputBox_PreviewKeyDown(object sender, KeyEventArgs e)
+		{
+			if (e.Key != Key.Enter)
 				return;
 
 			if (DataContext is not AiChatPaneModel model)
+				return;
+
+			var controlPressed = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
+			var shiftPressed = (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift;
+
+			var shouldSend = model.SendOnEnter
+				? !controlPressed && !shiftPressed
+				: controlPressed;
+
+			if (!shouldSend)
 				return;
 
 			if (!model.SubmitCommand.CanExecute(null))
@@ -46,6 +111,16 @@ namespace ICSharpCode.ILSpy.AIChat
 
 			model.SubmitCommand.Execute(null);
 			e.Handled = true;
+		}
+
+		private void MessageTextBox_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+		{
+			e.Handled = true;
+			var wheelEvent = new MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta) {
+				RoutedEvent = MouseWheelEvent,
+				Source = sender,
+			};
+			MessagesList.RaiseEvent(wheelEvent);
 		}
 	}
 }

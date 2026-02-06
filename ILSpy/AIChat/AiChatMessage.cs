@@ -31,6 +31,8 @@ namespace ICSharpCode.ILSpy.AIChat
 
 	public sealed class AiChatMessage
 	{
+		public long Id { get; init; }
+
 		public required AiChatMessageRole Role { get; init; }
 
 		public required string Text { get; init; }

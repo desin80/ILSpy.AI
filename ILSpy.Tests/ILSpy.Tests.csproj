@@ -42,6 +42,7 @@
 
   <ItemGroup>
     <Compile Include="AIChat\AiChatCommandParserTests.cs" />
+    <Compile Include="AIChat\AiChatToolCallParserTests.cs" />
     <Compile Include="Analyzers\ExportAnalyzerAttributeTests.cs" />
     <Compile Include="Analyzers\AnalyzerScopeTests.cs" />
     <Compile Include="Analyzers\MemberImplementsInterfaceAnalyzerTests.cs" />

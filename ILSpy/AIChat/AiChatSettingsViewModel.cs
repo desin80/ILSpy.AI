@@ -16,9 +16,7 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-using System.Collections.Generic;
 using System.Composition;
-using System.Linq;
 using System.Xml.Linq;
 
 using ICSharpCode.ILSpy.Options;
@@ -32,29 +30,17 @@ namespace ICSharpCode.ILSpy.AIChat
 	[NonShared]
 	public sealed class AiChatSettingsViewModel : ObservableObjectBase, IOptionPage
 	{
-		private AiChatSettings settings = new();
-
 		public string Title => "AI Chat";
-
-		public AiChatSettings Settings {
-			get => settings;
-			set => SetProperty(ref settings, value);
-		}
-
-		public IReadOnlyList<AiChatProviderDescriptor> ProviderItems { get; } = [
-			new() { Kind = AiChatProviderKind.Disabled, Name = "Disabled" },
-			new() { Kind = AiChatProviderKind.OpenAICompatible, Name = "OpenAI-compatible" },
-			new() { Kind = AiChatProviderKind.CodexCli, Name = "Codex CLI" },
-		];
 
 		public void Load(SettingsSnapshot snapshot)
 		{
-			Settings = snapshot.GetSettings<AiChatSettings>();
+			snapshot.GetSettings<AiChatSettings>();
 		}
 
 		public void LoadDefaults()
 		{
-			Settings.LoadFromXml(new XElement("dummy"));
+			var settings = new AiChatSettings();
+			settings.LoadFromXml(new XElement("dummy"));
 		}
 	}
 }

@@ -22,3 +22,11 @@ ILSpy.Installer/wix/
 **/.vscode/
 DecompilerTests.config.json
 *.trx
+
+# Local SDK/experiment artifacts
+/.local-dotnet-sdks/
+/Roslyn/
+
+# Local build diagnostics
+*.diag.log
+*.diag.log,verbosity

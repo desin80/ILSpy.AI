@@ -29,6 +29,8 @@ namespace ICSharpCode.ILSpy.AIChat
 	{
 		Prompt,
 		Ask,
+		Auto,
+		CodexTest,
 		Help,
 		Assemblies,
 		Selected,
@@ -90,6 +92,7 @@ namespace ICSharpCode.ILSpy.AIChat
 			return command switch
 			{
 				"help" or "h" or "?" => new() { Kind = AiChatCommandKind.Help },
+				"codex-test" or "codextest" or "ping" => new() { Kind = AiChatCommandKind.CodexTest },
 				"assemblies" or "ls" => new() { Kind = AiChatCommandKind.Assemblies },
 				"selected" or "sel" => new() { Kind = AiChatCommandKind.Selected },
 				"decompile" or "dec" => new() { Kind = AiChatCommandKind.Decompile },
@@ -97,6 +100,10 @@ namespace ICSharpCode.ILSpy.AIChat
 				"provider" or "config" => new() { Kind = AiChatCommandKind.Provider },
 				"ask" => new() {
 					Kind = AiChatCommandKind.Ask,
+					Prompt = string.Join(" ", parts.Skip(1)).Trim(),
+				},
+				"auto" or "workflow" or "run" => new() {
+					Kind = AiChatCommandKind.Auto,
 					Prompt = string.Join(" ", parts.Skip(1)).Trim(),
 				},
 				"search" or "find" => ParseSearch(parts),

@@ -47,7 +47,13 @@ namespace ICSharpCode.ILSpy.Docking
 		</LayoutPanel>
 	</RootPanel>
 	<TopSide />
-	<RightSide />
+	<RightSide>
+		<LayoutAnchorSide>
+			<LayoutAnchorGroup>
+				<LayoutAnchorable ContentId=""aiChatPane"" PreviousContainerIndex=""0"" />
+			</LayoutAnchorGroup>
+		</LayoutAnchorSide>
+	</RightSide>
 	<LeftSide />
 	<BottomSide />
 	<FloatingWindows />

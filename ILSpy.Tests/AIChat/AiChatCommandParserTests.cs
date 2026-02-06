@@ -18,6 +18,14 @@ namespace ICSharpCode.ILSpy.Tests.AIChat
 		}
 
 		[Test]
+		public void ParseCodexTestCommand()
+		{
+			var result = AiChatParsedCommand.Parse("/codex-test");
+
+			result.Kind.ShouldBe(AiChatCommandKind.CodexTest);
+		}
+
+		[Test]
 		public void ParsePromptWithoutSlash()
 		{
 			var result = AiChatParsedCommand.Parse("explain selected method");
@@ -33,6 +41,15 @@ namespace ICSharpCode.ILSpy.Tests.AIChat
 
 			result.Kind.ShouldBe(AiChatCommandKind.Ask);
 			result.Prompt.ShouldBe("summarize this class");
+		}
+
+		[Test]
+		public void ParseAutoCommand()
+		{
+			var result = AiChatParsedCommand.Parse("/auto trace login call path");
+
+			result.Kind.ShouldBe(AiChatCommandKind.Auto);
+			result.Prompt.ShouldBe("trace login call path");
 		}
 
 		[Test]

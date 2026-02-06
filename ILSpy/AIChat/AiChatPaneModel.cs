@@ -21,6 +21,7 @@ using System.Collections.ObjectModel;
 using System.Composition;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text;
 using System.Windows.Input;
 
 using ICSharpCode.ILSpy.Commands;
@@ -38,13 +39,16 @@ namespace ICSharpCode.ILSpy.AIChat
 		public const string PaneContentId = "aiChatPane";
 
 		private readonly AiChatService aiChatService;
+		private readonly SettingsService settingsService;
 		private string? inputText = string.Empty;
 		private bool isBusy;
 		private CancellationTokenSource? runningCts;
+		private long nextMessageId = 1;
 
-		public AiChatPaneModel(AiChatService aiChatService)
+		public AiChatPaneModel(AiChatService aiChatService, SettingsService settingsService)
 		{
 			this.aiChatService = aiChatService;
+			this.settingsService = settingsService;
 			ContentId = PaneContentId;
 			Title = "AI Chat";
 			Icon = "Images/Search";
@@ -54,8 +58,9 @@ namespace ICSharpCode.ILSpy.AIChat
 			CancelCommand = new DelegateCommand(Cancel, () => IsBusy);
 			ClearCommand = new DelegateCommand(Clear);
 			Messages.Add(new AiChatMessage {
+				Id = Interlocked.Increment(ref nextMessageId),
 				Role = AiChatMessageRole.System,
-				Text = "AI Chat ready. Type /help to see available commands.",
+				Text = "AI Chat ready. Type /help to see available commands, or /auto <goal> for autonomous workflow.",
 			});
 		}
 
@@ -85,6 +90,18 @@ namespace ICSharpCode.ILSpy.AIChat
 
 		public ICommand ClearCommand { get; }
 
+		public bool SendOnEnter {
+			get => settingsService.GetSettings<AiChatSettings>().SendOnEnter;
+			set {
+				var settings = settingsService.GetSettings<AiChatSettings>();
+				if (settings.SendOnEnter == value)
+					return;
+
+				settings.SendOnEnter = value;
+				OnPropertyChanged();
+			}
+		}
+
 		private void Submit()
 		{
 			if (IsBusy)
@@ -97,6 +114,7 @@ namespace ICSharpCode.ILSpy.AIChat
 			InputText = string.Empty;
 			CommandManager.InvalidateRequerySuggested();
 			Messages.Add(new AiChatMessage {
+				Id = Interlocked.Increment(ref nextMessageId),
 				Role = AiChatMessageRole.User,
 				Text = text,
 			});
@@ -112,28 +130,41 @@ namespace ICSharpCode.ILSpy.AIChat
 			previous?.Dispose();
 
 			IsBusy = true;
+			var assistantMessageId = Interlocked.Increment(ref nextMessageId);
+			var streamingBuilder = new StringBuilder();
+			Messages.Add(new AiChatMessage {
+				Id = assistantMessageId,
+				Role = AiChatMessageRole.Assistant,
+				Text = "[status] Working...",
+			});
+
+			Task ReportProgressAsync(string update)
+			{
+				return App.Current.Dispatcher.InvokeAsync(() =>
+				{
+					if (string.IsNullOrEmpty(update))
+						return;
+
+					streamingBuilder.Append(update);
+					ReplaceMessage(assistantMessageId, AiChatMessageRole.Assistant, streamingBuilder.ToString());
+				}).Task;
+			}
 			try
 			{
 				var parsed = AiChatParsedCommand.Parse(input);
-				var output = await aiChatService.ExecuteAsync(parsed, runningCts.Token);
-				Messages.Add(new AiChatMessage {
-					Role = AiChatMessageRole.Assistant,
-					Text = output,
-				});
+				var output = await aiChatService.ExecuteAsync(parsed, ReportProgressAsync, runningCts.Token);
+				if (!string.IsNullOrWhiteSpace(output))
+				{
+					ReplaceMessage(assistantMessageId, AiChatMessageRole.Assistant, output);
+				}
 			}
 			catch (OperationCanceledException)
 			{
-				Messages.Add(new AiChatMessage {
-					Role = AiChatMessageRole.System,
-					Text = "Current request cancelled.",
-				});
+				ReplaceMessage(assistantMessageId, AiChatMessageRole.System, "Current request cancelled.");
 			}
 			catch (System.Exception ex)
 			{
-				Messages.Add(new AiChatMessage {
-					Role = AiChatMessageRole.System,
-					Text = $"Error: {ex.Message}",
-				});
+				ReplaceMessage(assistantMessageId, AiChatMessageRole.System, $"Error: {ex.Message}");
 			}
 			finally
 			{
@@ -150,9 +181,39 @@ namespace ICSharpCode.ILSpy.AIChat
 		{
 			Messages.Clear();
 			Messages.Add(new AiChatMessage {
+				Id = Interlocked.Increment(ref nextMessageId),
 				Role = AiChatMessageRole.System,
 				Text = "Chat cleared.",
 			});
+		}
+
+		private void ReplaceMessage(long messageId, AiChatMessageRole role, string text)
+		{
+			var index = -1;
+			for (var i = 0; i < Messages.Count; i++)
+			{
+				if (Messages[i].Id == messageId)
+				{
+					index = i;
+					break;
+				}
+			}
+
+			if (index < 0)
+			{
+				Messages.Add(new AiChatMessage {
+					Id = messageId,
+					Role = role,
+					Text = text,
+				});
+				return;
+			}
+
+			Messages[index] = new AiChatMessage {
+				Id = messageId,
+				Role = role,
+				Text = text,
+			};
 		}
 	}
 }

@@ -25,6 +25,8 @@ using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Threading;
 
@@ -33,6 +35,7 @@ using AvalonDock.Layout;
 using AvalonDock.Layout.Serialization;
 
 using ICSharpCode.AvalonEdit.Highlighting;
+using ICSharpCode.ILSpy.AIChat;
 using ICSharpCode.ILSpy.Analyzers;
 using ICSharpCode.ILSpy.Search;
 using ICSharpCode.ILSpy.TextView;
@@ -140,10 +143,66 @@ namespace ICSharpCode.ILSpy.Docking
 			var pane = ToolPanes.FirstOrDefault(p => p.ContentId == contentId);
 			if (pane != null)
 			{
+				if (pane is AiChatPaneModel)
+				{
+					EnsureAiChatPaneDockedRight(pane);
+				}
+
 				pane.Show();
 				return true;
 			}
 			return false;
+		}
+
+		private void EnsureAiChatPaneDockedRight(ToolPaneModel pane)
+		{
+			var layout = DockingManager.Layout;
+			if (layout == null)
+				return;
+
+			var anchorable = layout.Descendents()
+				.OfType<LayoutAnchorable>()
+				.FirstOrDefault(item => ReferenceEquals(item.Content, pane) || item.ContentId == pane.ContentId);
+
+			if (anchorable == null)
+				return;
+
+			var targetPane = GetOrCreateAiChatPaneContainer(layout);
+			if (ReferenceEquals(anchorable.Parent, targetPane))
+				return;
+
+			switch (anchorable.Parent)
+			{
+				case LayoutAnchorablePane parentPane:
+					parentPane.Children.Remove(anchorable);
+					break;
+				case LayoutAnchorGroup parentGroup:
+					parentGroup.Children.Remove(anchorable);
+					break;
+			}
+
+			targetPane.Children.Add(anchorable);
+		}
+
+		private LayoutAnchorablePane GetOrCreateAiChatPaneContainer(LayoutRoot layout)
+		{
+			var existing = layout.Descendents()
+				.OfType<LayoutAnchorablePane>()
+				.FirstOrDefault(item => item.Children.OfType<LayoutAnchorable>().Any(content => content.ContentId == AiChatPaneModel.PaneContentId));
+
+			if (existing != null)
+				return existing;
+
+			var pane = new LayoutAnchorablePane();
+
+			var group = new LayoutAnchorablePaneGroup {
+				Orientation = Orientation.Horizontal,
+				DockWidth = new GridLength(360),
+			};
+
+			group.Children.Add(pane);
+			layout.RootPanel.Children.Add(group);
+			return pane;
 		}
 
 		public void Remove(PaneModel model)
@@ -269,6 +328,13 @@ namespace ICSharpCode.ILSpy.Docking
 
 		public bool BeforeInsertAnchorable(LayoutRoot layout, LayoutAnchorable anchorableToShow, ILayoutContainer destinationContainer)
 		{
+			if (anchorableToShow.Content is AiChatPaneModel)
+			{
+				anchorableToShow.CanDockAsTabbedDocument = false;
+				GetOrCreateAiChatPaneContainer(layout).Children.Add(anchorableToShow);
+				return true;
+			}
+
 			if (!(anchorableToShow.Content is LegacyToolPaneModel legacyContent))
 				return false;
 			anchorableToShow.CanDockAsTabbedDocument = false;
