@@ -79,7 +79,7 @@ namespace ICSharpCode.ILSpy.Tests.AIChat
 		[Test]
 		public void ParseToolCallWithStructuredArguments()
 		{
-			const string text = "<tool_call>{\"name\":\"decompile_many\",\"arguments\":{\"targets\":[{\"kind\":\"query\",\"mode\":\"type\",\"term\":\"String\"}],\"window\":{\"startLine\":101,\"lineCount\":120}}}</tool_call>";
+			const string text = "<tool_call>{\"name\":\"decompile_many\",\"arguments\":{\"targets\":[{\"kind\":\"query\",\"mode\":\"type\",\"term\":\"String\",\"take\":4}],\"window\":{\"startLine\":101,\"lineCount\":120}}}</tool_call>";
 
 			var result = AiChatToolCallParser.Parse(text);
 
@@ -91,6 +91,7 @@ namespace ICSharpCode.ILSpy.Tests.AIChat
 			result.Arguments.ShouldNotBeNull();
 			result.Arguments.Value.TryGetProperty("targets", out _).ShouldBeTrue();
 			result.Arguments.Value.TryGetProperty("window", out _).ShouldBeTrue();
+			result.Arguments.Value.GetProperty("targets")[0].GetProperty("take").GetInt32().ShouldBe(4);
 		}
 
 		[Test]

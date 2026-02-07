@@ -25,6 +25,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Diagnostics;
 
 using ICSharpCode.Decompiler;
 using ICSharpCode.Decompiler.TypeSystem;
@@ -52,6 +53,10 @@ namespace ICSharpCode.ILSpy.AIChat
 		private const int SearchMaxResults = 30;
 		private const int SearchManyMaxConcurrency = 3;
 		private const int DecompileManyMaxConcurrency = 2;
+		private const int DecompileManyDefaultQueryTake = 3;
+		private const int DecompileManyMaxQueryTake = 8;
+		private const int MaxDecompileCacheEntries = 16;
+		private const int MaxDecompileCacheTotalChars = 8_000_000;
 
 		private static readonly HashSet<string> ChunkedTools = new(StringComparer.OrdinalIgnoreCase) {
 			"assemblies",
@@ -69,6 +74,8 @@ namespace ICSharpCode.ILSpy.AIChat
 		private readonly DockWorkspace dockWorkspace;
 		private readonly AiChatSearchService searchService;
 		private readonly ConcurrentDictionary<string, ContinuationState> continuationStates = new(StringComparer.Ordinal);
+		private readonly object decompileCacheLock = new();
+		private readonly Dictionary<string, DecompileTextCacheEntry> decompileTextCache = new(StringComparer.Ordinal);
 
 		public AiChatToolDispatcher(AssemblyTreeModel assemblyTreeModel, AnalyzerTreeViewModel analyzerTreeViewModel, DockWorkspace dockWorkspace, AiChatSearchService searchService)
 		{
@@ -99,6 +106,7 @@ namespace ICSharpCode.ILSpy.AIChat
 				"- if output is truncated, use continue_output with continue_token",
 				"- search_many queries = [{\"mode\":\"type\",\"term\":\"PromoItemChecker\"}]",
 				"- decompile_many targets = [{\"kind\":\"search_index\",\"index\":1}] or [{\"kind\":\"query\",\"mode\":\"type\",\"term\":\"PromoItemChecker\"}]",
+				"- query targets in decompile_many may include take (default 3, max 8) to auto-decompile first matching candidates",
 				"Tool call format:",
 				"<tool_call>",
 				"{\"name\":\"search\",\"arguments\":{\"mode\":\"method\",\"term\":\"Find\"}}",
@@ -112,6 +120,8 @@ namespace ICSharpCode.ILSpy.AIChat
 
 		public async Task<AiChatToolResult> ExecuteAsync(string toolName, string? mode, string? term, int? index, JsonElement? arguments, CancellationToken cancellationToken)
 		{
+			var stopwatch = Stopwatch.StartNew();
+			AiChatLog.Info($"tool start name={toolName} mode={mode ?? "<null>"} termLength={(term?.Length ?? 0)} index={(index?.ToString() ?? "<null>")}");
 			try
 			{
 				AiChatToolResult result;
@@ -130,10 +140,10 @@ namespace ICSharpCode.ILSpy.AIChat
 						result = new() { Success = true, Output = GetSelectedText() };
 						break;
 					case "decompile":
-						result = new() { Success = true, Output = DecompileSelectedNode() };
+						result = new() { Success = true, Output = await Task.Run(() => DecompileSelectedNode(cancellationToken), cancellationToken) };
 						break;
 					case "read_selected_window":
-						result = new() { Success = true, Output = ReadSelectedWindow(arguments) };
+						result = new() { Success = true, Output = await Task.Run(() => ReadSelectedWindow(arguments, cancellationToken), cancellationToken) };
 						break;
 					case "search":
 						result = new() { Success = true, Output = await SearchAsync(mode ?? "member", term ?? string.Empty, cancellationToken) };
@@ -145,7 +155,7 @@ namespace ICSharpCode.ILSpy.AIChat
 						result = new() { Success = true, Output = await DecompileManyAsync(arguments, cancellationToken) };
 						break;
 					case "read_result_window":
-						result = new() { Success = true, Output = ReadResultWindow(index, arguments) };
+						result = new() { Success = true, Output = await Task.Run(() => ReadResultWindow(index, arguments, cancellationToken), cancellationToken) };
 						break;
 					case "analyze":
 						result = new() { Success = true, Output = AnalyzeSelected() };
@@ -166,15 +176,19 @@ namespace ICSharpCode.ILSpy.AIChat
 					};
 				}
 
+				AiChatLog.Info($"tool finish name={toolName} success={result.Success} outputLength={(result.Output?.Length ?? 0)} elapsedMs={stopwatch.ElapsedMilliseconds}");
+
 				return result;
 			}
 			catch (Exception ex)
 			{
+				AiChatLog.Error(ex, $"tool failed name={toolName} elapsedMs={stopwatch.ElapsedMilliseconds}");
 				return new() { Success = false, Output = ex.Message };
 			}
 			finally
 			{
 				TrimContinuationStates();
+				TrimDecompileTextCache();
 			}
 		}
 
@@ -383,10 +397,10 @@ namespace ICSharpCode.ILSpy.AIChat
 			return string.Join(Environment.NewLine, nodes.Select((node, i) => $"{i + 1}. {node.Text} [{node.GetType().Name}]"));
 		}
 
-		private string DecompileSelectedNode()
+		private string DecompileSelectedNode(CancellationToken cancellationToken)
 		{
 			const int maxLength = 12_000;
-			var text = DecompileSelectedNodeText();
+			var text = DecompileSelectedNodeText(cancellationToken);
 			if (text.StartsWith("No selected node to decompile.", StringComparison.Ordinal))
 			{
 				return text;
@@ -400,7 +414,7 @@ namespace ICSharpCode.ILSpy.AIChat
 			return text;
 		}
 
-		private string DecompileSelectedNodeText()
+		private string DecompileSelectedNodeText(CancellationToken cancellationToken)
 		{
 			var node = assemblyTreeModel.SelectedNodes.FirstOrDefault();
 			if (node == null)
@@ -408,9 +422,15 @@ namespace ICSharpCode.ILSpy.AIChat
 				return "No selected node to decompile.";
 			}
 
+			if (node is IMemberTreeNode { Member: IEntity selectedEntity })
+			{
+				return DecompileEntity(selectedEntity, cancellationToken);
+			}
+
 			var output = new PlainTextOutput();
 			var options = dockWorkspace.ActiveTabPage.CreateDecompilationOptions();
 			options.FullDecompilation = false;
+			options.CancellationToken = cancellationToken;
 			node.Decompile(assemblyTreeModel.CurrentLanguage, output, options);
 			return output.ToString();
 		}
@@ -452,7 +472,7 @@ namespace ICSharpCode.ILSpy.AIChat
 			return results.ToArray();
 		}
 
-		private string ReadSelectedWindow(JsonElement? arguments)
+		private string ReadSelectedWindow(JsonElement? arguments, CancellationToken cancellationToken)
 		{
 			if (!TryParseWindowArguments(arguments, out var window, out var parseError))
 			{
@@ -460,7 +480,7 @@ namespace ICSharpCode.ILSpy.AIChat
 			}
 
 			var selected = GetSelectedText();
-			var rawText = DecompileSelectedNodeText();
+			var rawText = DecompileSelectedNodeText(cancellationToken);
 			if (rawText.StartsWith("No selected node to decompile.", StringComparison.Ordinal))
 			{
 				return rawText;
@@ -585,24 +605,48 @@ namespace ICSharpCode.ILSpy.AIChat
 					}
 
 					querySearchResults.AddRange(hits);
+
+					var decompilableHits = new List<(SearchResult Result, IEntity Entity)>();
+					foreach (var hit in hits)
+					{
+						if (TryResolveEntity(hit, out var entityCandidate, out _))
+						{
+							decompilableHits.Add((hit, entityCandidate));
+						}
+					}
+
+					if (decompilableHits.Count == 0)
+					{
+						var preview = hits.Take(8).Select((item, idx) => $"  - {idx + 1}. {item.Name} | {item.Location} | {item.Assembly}");
+						immediateMessages.Add(string.Join(Environment.NewLine, new[] {
+							$"target {i + 1}: query mode='{request.Mode}' term='{request.Term}' returned {hits.Length} hits, but none are decompilable entities.",
+							"candidates:",
+						}.Concat(preview)));
+						continue;
+					}
+
+					var candidateTake = hits.Length > 1
+						? Math.Min(NormalizeDecompileManyQueryTake(request.Take), decompilableHits.Count)
+						: 1;
+
 					if (hits.Length > 1)
 					{
-						var hitLines = hits.Take(8).Select((item, idx) => $"  - {idx + 1}. {item.Name} | {item.Location} | {item.Assembly}");
-						var multiMessage = string.Join(Environment.NewLine, new[] {
-							$"target {i + 1}: query mode='{request.Mode}' term='{request.Term}' has {hits.Length} hits. refine query or use search_index.",
+						var preview = hits.Take(8).Select((item, idx) => $"  - {idx + 1}. {item.Name} | {item.Location} | {item.Assembly}");
+						immediateMessages.Add(string.Join(Environment.NewLine, new[] {
+							$"target {i + 1}: query mode='{request.Mode}' term='{request.Term}' has {hits.Length} hits; auto-decompiling first {candidateTake} decompilable candidate(s).",
 							"candidates:",
-						}.Concat(hitLines));
-						immediateMessages.Add(multiMessage);
-						continue;
+						}.Concat(preview)));
 					}
 
-					if (!TryResolveEntity(hits[0], out var singleEntity, out var singleError))
+					for (var candidateIndex = 0; candidateIndex < candidateTake; candidateIndex++)
 					{
-						immediateMessages.Add($"target {i + 1}: {singleError}");
-						continue;
+						var candidate = decompilableHits[candidateIndex];
+						var label = hits.Length > 1
+							? $"target {i + 1} (query mode='{request.Mode}' term='{request.Term}', candidate {candidateIndex + 1}/{decompilableHits.Count})"
+							: $"target {i + 1} (query mode='{request.Mode}' term='{request.Term}')";
+						directJobs.Add(new(label, candidate.Entity));
 					}
 
-					directJobs.Add(new($"target {i + 1} (query mode='{request.Mode}' term='{request.Term}')", singleEntity));
 					continue;
 				}
 
@@ -656,7 +700,7 @@ namespace ICSharpCode.ILSpy.AIChat
 			return builder.ToString().TrimEnd();
 		}
 
-		private string ReadResultWindow(int? index, JsonElement? arguments)
+		private string ReadResultWindow(int? index, JsonElement? arguments, CancellationToken cancellationToken)
 		{
 			if (!TryParseWindowArguments(arguments, out var window, out var parseWindowError))
 			{
@@ -681,7 +725,7 @@ namespace ICSharpCode.ILSpy.AIChat
 				return resolveError;
 			}
 
-			var text = DecompileEntity(entity, CancellationToken.None);
+			var text = DecompileEntity(entity, cancellationToken);
 			var slice = SliceTextWindow(text, window.StartLine, window.LineCount);
 
 			var builder = new StringBuilder();
@@ -725,8 +769,8 @@ namespace ICSharpCode.ILSpy.AIChat
 
 			if (jobs.Count == 1)
 			{
-				var serialItems = await ExecuteDecompileJobsSerialAsync(jobs, window, cancellationToken);
-				return new(serialItems, null);
+				var singleItem = await Task.Run(() => DecompileJobToResult(jobs[0], 0, window, cancellationToken), cancellationToken);
+				return new(new List<DecompileWindowResult> { singleItem }, null);
 			}
 
 			try
@@ -762,16 +806,17 @@ namespace ICSharpCode.ILSpy.AIChat
 			return results.OrderBy(item => item.Order).ToList();
 		}
 
-		private Task<List<DecompileWindowResult>> ExecuteDecompileJobsSerialAsync(List<DecompileJob> jobs, WindowRequest window, CancellationToken cancellationToken)
+		private async Task<List<DecompileWindowResult>> ExecuteDecompileJobsSerialAsync(List<DecompileJob> jobs, WindowRequest window, CancellationToken cancellationToken)
 		{
 			var results = new List<DecompileWindowResult>(jobs.Count);
 			for (var i = 0; i < jobs.Count; i++)
 			{
 				cancellationToken.ThrowIfCancellationRequested();
-				results.Add(DecompileJobToResult(jobs[i], i, window, cancellationToken));
+				var item = await Task.Run(() => DecompileJobToResult(jobs[i], i, window, cancellationToken), cancellationToken);
+				results.Add(item);
 			}
 
-			return Task.FromResult(results);
+			return results;
 		}
 
 		private DecompileWindowResult DecompileJobToResult(DecompileJob job, int order, WindowRequest window, CancellationToken cancellationToken)
@@ -783,6 +828,14 @@ namespace ICSharpCode.ILSpy.AIChat
 
 		private string DecompileEntity(IEntity entity, CancellationToken cancellationToken)
 		{
+			var cacheKey = BuildDecompileCacheKey(entity);
+			if (TryGetCachedDecompileText(cacheKey, out var cachedText))
+			{
+				AiChatLog.Info($"decompile cache hit keyHash={cacheKey.GetHashCode()} length={cachedText.Length}");
+				return cachedText;
+			}
+
+			AiChatLog.Info($"decompile cache miss keyHash={cacheKey.GetHashCode()}");
 			var options = dockWorkspace.ActiveTabPage?.CreateDecompilationOptions();
 			if (options == null)
 			{
@@ -815,7 +868,78 @@ namespace ICSharpCode.ILSpy.AIChat
 					throw new InvalidOperationException($"Unsupported entity type '{entity.GetType().Name}' for decompilation.");
 			}
 
-			return output.ToString();
+			var text = output.ToString();
+			StoreCachedDecompileText(cacheKey, text);
+			return text;
+		}
+
+		private string BuildDecompileCacheKey(IEntity entity)
+		{
+			var moduleName = entity.ParentModule?.Name ?? "<unknown-module>";
+			var languageName = assemblyTreeModel.CurrentLanguage?.Name ?? "<unknown-language>";
+			return moduleName + "|" + languageName + "|" + entity.FullName;
+		}
+
+		private bool TryGetCachedDecompileText(string cacheKey, out string text)
+		{
+			lock (decompileCacheLock)
+			{
+				if (decompileTextCache.TryGetValue(cacheKey, out var entry))
+				{
+					entry.LastAccessUtc = DateTime.UtcNow;
+					text = entry.Text;
+					return true;
+				}
+			}
+
+			text = string.Empty;
+			return false;
+		}
+
+		private void StoreCachedDecompileText(string cacheKey, string text)
+		{
+			if (string.IsNullOrEmpty(text))
+			{
+				return;
+			}
+
+			lock (decompileCacheLock)
+			{
+				decompileTextCache[cacheKey] = new(text, DateTime.UtcNow);
+			}
+		}
+
+		private void TrimDecompileTextCache()
+		{
+			lock (decompileCacheLock)
+			{
+				if (decompileTextCache.Count == 0)
+				{
+					return;
+				}
+
+				var totalChars = decompileTextCache.Values.Sum(entry => entry.Text.Length);
+				if (decompileTextCache.Count <= MaxDecompileCacheEntries && totalChars <= MaxDecompileCacheTotalChars)
+				{
+					return;
+				}
+
+				foreach (var key in decompileTextCache.OrderBy(item => item.Value.LastAccessUtc).Select(item => item.Key).ToArray())
+				{
+					if (decompileTextCache.Count <= MaxDecompileCacheEntries && totalChars <= MaxDecompileCacheTotalChars)
+					{
+						break;
+					}
+
+					if (!decompileTextCache.TryGetValue(key, out var entry))
+					{
+						continue;
+					}
+
+					decompileTextCache.Remove(key);
+					totalChars -= entry.Text.Length;
+				}
+			}
 		}
 
 		private static bool TryResolveEntity(SearchResult searchResult, out IEntity entity, out string error)
@@ -1054,6 +1178,7 @@ namespace ICSharpCode.ILSpy.AIChat
 				int? index = null;
 				string? mode = null;
 				string? term = null;
+				int? take = null;
 
 				if (targetElement.TryGetProperty("index", out var indexElement) && indexElement.ValueKind == JsonValueKind.Number && indexElement.TryGetInt32(out var parsedIndex))
 				{
@@ -1070,7 +1195,18 @@ namespace ICSharpCode.ILSpy.AIChat
 					term = termElement.GetString();
 				}
 
-				targets.Add(new(kind, index, mode, term));
+				if (targetElement.TryGetProperty("take", out var takeElement))
+				{
+					if (takeElement.ValueKind != JsonValueKind.Number || !takeElement.TryGetInt32(out var parsedTake))
+					{
+						error = "target.take must be an integer.";
+						return false;
+					}
+
+					take = parsedTake;
+				}
+
+				targets.Add(new(kind, index, mode, term, take));
 			}
 
 			if (targets.Count == 0)
@@ -1080,6 +1216,16 @@ namespace ICSharpCode.ILSpy.AIChat
 			}
 
 			return true;
+		}
+
+		internal static int NormalizeDecompileManyQueryTake(int? requestedTake)
+		{
+			if (!requestedTake.HasValue)
+			{
+				return DecompileManyDefaultQueryTake;
+			}
+
+			return Math.Clamp(requestedTake.Value, 1, DecompileManyMaxQueryTake);
 		}
 
 		private sealed record SearchQuery(string Mode, string Term);
@@ -1111,13 +1257,26 @@ namespace ICSharpCode.ILSpy.AIChat
 			public DateTime LastAccessUtc { get; set; }
 		}
 
-		private sealed record DecompileTargetRequest(string Kind, int? Index, string? Mode, string? Term);
+		private sealed record DecompileTargetRequest(string Kind, int? Index, string? Mode, string? Term, int? Take);
 
 		private sealed record DecompileJob(string Label, IEntity Entity);
 
 		private sealed record DecompileWindowResult(int Order, string Label, string EntityDisplayName, TextWindowSlice Slice);
 
 		private sealed record DecompileExecutionResult(List<DecompileWindowResult> Items, string? FallbackMessage);
+
+		private sealed class DecompileTextCacheEntry
+		{
+			public DecompileTextCacheEntry(string text, DateTime lastAccessUtc)
+			{
+				Text = text;
+				LastAccessUtc = lastAccessUtc;
+			}
+
+			public string Text { get; }
+
+			public DateTime LastAccessUtc { get; set; }
+		}
 
 		internal readonly record struct TextWindowSlice(int StartLine, int ReturnedLineCount, int TotalLines, bool HasMore, int NextStartLine, string Text);
 

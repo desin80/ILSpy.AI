@@ -79,8 +79,10 @@ namespace ICSharpCode.ILSpy.AIChat
 			Process? process = null;
 			string? outputLastMessagePath = null;
 			var askTimeout = AskTimeout;
+			var stopwatch = Stopwatch.StartNew();
 			try
 			{
+				AiChatLog.Info($"codex ask start promptLength={prompt.Length} timeoutSec={(int)askTimeout.TotalSeconds}");
 				using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 				timeoutCts.CancelAfter(askTimeout);
 				var token = timeoutCts.Token;
@@ -106,9 +108,11 @@ namespace ICSharpCode.ILSpy.AIChat
 				try
 				{
 					process.Start();
+					AiChatLog.Info($"codex process started file='{executable}' pid={process.Id}");
 				}
 				catch (Exception ex)
 				{
+					AiChatLog.Error(ex, "codex process start failed");
 					return $"Failed to start Codex CLI '{executable}': {ex.Message}";
 				}
 
@@ -181,6 +185,7 @@ namespace ICSharpCode.ILSpy.AIChat
 
 				if (process.ExitCode != 0)
 				{
+					AiChatLog.Warn($"codex process exited with code={process.ExitCode} stderrLength={error.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
 					return string.IsNullOrWhiteSpace(error)
 						? $"Codex CLI failed with exit code {process.ExitCode}."
 						: $"Codex CLI failed with exit code {process.ExitCode}.{Environment.NewLine}{error}";
@@ -189,15 +194,25 @@ namespace ICSharpCode.ILSpy.AIChat
 				var lastMessage = TryReadOutputLastMessage(outputLastMessagePath);
 				if (!string.IsNullOrWhiteSpace(lastMessage))
 				{
+					AiChatLog.Info($"codex ask success source=outfile length={lastMessage.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
 					return lastMessage;
 				}
 
 				if (!string.IsNullOrWhiteSpace(output))
 				{
 					var normalized = ExtractAssistantMessageFromTranscript(output);
-					return string.IsNullOrWhiteSpace(normalized) ? output : normalized;
+					if (string.IsNullOrWhiteSpace(normalized) && LooksLikeCodexTranscript(output))
+					{
+						AiChatLog.Warn($"codex transcript parse failed length={output.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
+						return "Codex returned a transcript but no final assistant message. Please retry, narrow the request, or reduce context.";
+					}
+
+					var finalText = string.IsNullOrWhiteSpace(normalized) ? output : normalized;
+					AiChatLog.Info($"codex ask success source=stdout length={finalText.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
+					return finalText;
 				}
 
+				AiChatLog.Warn($"codex ask finished with empty output stderrLength={error.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
 				return string.IsNullOrWhiteSpace(error) ? "Codex CLI returned no output." : error;
 			}
 			catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -213,6 +228,7 @@ namespace ICSharpCode.ILSpy.AIChat
 				{
 				}
 
+				AiChatLog.Warn($"codex ask timeout elapsedMs={stopwatch.ElapsedMilliseconds}");
 				return $"Codex request timed out after {(int)askTimeout.TotalSeconds}s. You can retry, narrow the question, or reduce context.";
 			}
 			finally
@@ -257,20 +273,29 @@ namespace ICSharpCode.ILSpy.AIChat
 				return string.Empty;
 			}
 
-			var text = output.Trim();
+			var text = NormalizeLineEndings(output).Trim();
 			if (!text.StartsWith("OpenAI Codex", StringComparison.OrdinalIgnoreCase))
 			{
 				return text;
 			}
 
-			var assistantMarker = "\nassistant\n";
-			var index = text.LastIndexOf(assistantMarker, StringComparison.OrdinalIgnoreCase);
-			if (index < 0)
+			var lines = text.Split('\n');
+			var assistantLineIndex = -1;
+			for (var i = lines.Length - 1; i >= 0; i--)
+			{
+				if (string.Equals(lines[i].Trim(), "assistant", StringComparison.OrdinalIgnoreCase))
+				{
+					assistantLineIndex = i;
+					break;
+				}
+			}
+
+			if (assistantLineIndex < 0 || assistantLineIndex >= lines.Length - 1)
 			{
 				return string.Empty;
 			}
 
-			var extracted = text[(index + assistantMarker.Length)..].Trim();
+			var extracted = string.Join("\n", lines.Skip(assistantLineIndex + 1)).Trim();
 			if (string.IsNullOrWhiteSpace(extracted))
 			{
 				return string.Empty;
@@ -283,6 +308,16 @@ namespace ICSharpCode.ILSpy.AIChat
 			}
 
 			return extracted;
+		}
+
+		private static bool LooksLikeCodexTranscript(string output)
+		{
+			return NormalizeLineEndings(output).TrimStart().StartsWith("OpenAI Codex", StringComparison.OrdinalIgnoreCase);
+		}
+
+		private static string NormalizeLineEndings(string text)
+		{
+			return text.Replace("\r\n", "\n").Replace('\r', '\n');
 		}
 
 		private static string GetCodexExecutable()

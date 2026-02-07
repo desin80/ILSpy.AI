@@ -25,6 +25,7 @@ using System.Threading.Tasks;
 using System.Text;
 using System.Windows.Input;
 using System.Linq;
+using System.Diagnostics;
 
 using ICSharpCode.ILSpy.Commands;
 using ICSharpCode.ILSpy.ViewModels;
@@ -182,6 +183,10 @@ namespace ICSharpCode.ILSpy.AIChat
 
 		private async Task ExecuteAsync(string input)
 		{
+			var requestId = AiChatLog.NextRequestId();
+			var executionStopwatch = Stopwatch.StartNew();
+			AiChatLog.Info($"request#{requestId} start autoMode={AutoModeEnabled} inputLength={input.Length}");
+
 			var previous = runningCts;
 			runningCts?.Cancel();
 			runningCts = new CancellationTokenSource();
@@ -212,25 +217,40 @@ namespace ICSharpCode.ILSpy.AIChat
 			try
 			{
 				var parsed = AiChatParsedCommand.Parse(input);
+				AiChatLog.Info($"request#{requestId} parsed command={parsed.Kind}");
 				if (AutoModeEnabled && parsed.Kind is AiChatCommandKind.Prompt or AiChatCommandKind.Ask)
 				{
 					parsed = new AiChatParsedCommand {
 						Kind = AiChatCommandKind.Auto,
 						Prompt = parsed.Prompt,
 					};
+					AiChatLog.Info($"request#{requestId} command upgraded to auto mode");
 				}
 				var output = await aiChatService.ExecuteAsync(parsed, ReportProgressAsync, runningCts.Token);
 				if (!string.IsNullOrWhiteSpace(output))
 				{
 					ReplaceMessage(assistantMessageId, AiChatMessageRole.Assistant, output);
 				}
+
+				AiChatLog.Info($"request#{requestId} completed outputLength={(output?.Length ?? 0)} elapsedMs={executionStopwatch.ElapsedMilliseconds}");
 			}
 			catch (OperationCanceledException)
 			{
-				ReplaceMessage(assistantMessageId, AiChatMessageRole.System, "Current request cancelled.");
+				AiChatLog.Warn($"request#{requestId} cancelled elapsedMs={executionStopwatch.ElapsedMilliseconds}");
+				var partialOutput = streamingBuilder.ToString().TrimEnd();
+				if (partialOutput.Length == 0)
+				{
+					ReplaceMessage(assistantMessageId, AiChatMessageRole.System, "Current request cancelled.");
+				}
+				else
+				{
+					ReplaceMessage(assistantMessageId, AiChatMessageRole.Assistant,
+						partialOutput + Environment.NewLine + Environment.NewLine + "[status] Request interrupted.");
+				}
 			}
 			catch (System.Exception ex)
 			{
+				AiChatLog.Error(ex, $"request#{requestId} failed elapsedMs={executionStopwatch.ElapsedMilliseconds}");
 				ReplaceMessage(assistantMessageId, AiChatMessageRole.System, $"Error: {ex.Message}");
 			}
 			finally

@@ -42,6 +42,7 @@ namespace ICSharpCode.ILSpy.AIChat
 	public partial class AiChatPane
 	{
 		private const double StepDetailsMaxHeight = 300;
+		private const int LargeSectionPreviewChars = 6000;
 		private static readonly string[] WaitingDots = [".", "..", "..."];
 		private static readonly Dictionary<string, string> FriendlyToolNames = new(StringComparer.OrdinalIgnoreCase) {
 			["assemblies"] = "List loaded assemblies",
@@ -362,8 +363,14 @@ namespace ICSharpCode.ILSpy.AIChat
 				FontSize = 11,
 			});
 
+			var normalizedContent = content.TrimEnd();
+			var hasPreview = large && normalizedContent.Length > LargeSectionPreviewChars;
+			var previewText = hasPreview
+				? normalizedContent.Substring(0, LargeSectionPreviewChars) + Environment.NewLine + "... [collapsed preview]"
+				: normalizedContent;
+
 			var editor = new TextBox {
-				Text = content.TrimEnd(),
+				Text = previewText,
 				IsReadOnly = true,
 				AcceptsReturn = true,
 				TextWrapping = TextWrapping.Wrap,
@@ -375,7 +382,9 @@ namespace ICSharpCode.ILSpy.AIChat
 				Foreground = bodyBrush,
 				Margin = new Thickness(4, 0, 0, 8),
 				FontSize = 12,
+				IsUndoEnabled = false,
 			};
+			SpellCheck.SetIsEnabled(editor, false);
 
 			if (large)
 			{
@@ -383,6 +392,31 @@ namespace ICSharpCode.ILSpy.AIChat
 			}
 
 			host.Children.Add(editor);
+
+			if (!hasPreview)
+			{
+				return;
+			}
+
+			var toggle = new Button {
+				Content = "Show full",
+				FontSize = 11,
+				FontWeight = FontWeights.Normal,
+				HorizontalAlignment = HorizontalAlignment.Left,
+				Margin = new Thickness(4, -4, 0, 8),
+				Padding = new Thickness(6, 1, 6, 1),
+				MinHeight = 22,
+			};
+
+			var expanded = false;
+			toggle.Click += (_, _) =>
+			{
+				expanded = !expanded;
+				editor.Text = expanded ? normalizedContent : previewText;
+				toggle.Content = expanded ? "Show preview" : "Show full";
+			};
+
+			host.Children.Add(toggle);
 		}
 
 		private static string BuildStepHeader(AutoStepRender step)

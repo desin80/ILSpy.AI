@@ -23,6 +23,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Diagnostics;
 
 namespace ICSharpCode.ILSpy.AIChat
 {
@@ -57,6 +58,11 @@ namespace ICSharpCode.ILSpy.AIChat
 
 		private async Task<string> ExecuteCoreAsync(AiChatParsedCommand command, Func<string, Task>? onProgress, CancellationToken cancellationToken)
 		{
+			var stopwatch = Stopwatch.StartNew();
+			AiChatLog.Info($"service execute command={command.Kind}");
+
+			try
+			{
 				switch (command.Kind)
 				{
 					case AiChatCommandKind.Help:
@@ -84,6 +90,16 @@ namespace ICSharpCode.ILSpy.AIChat
 					return $"Unknown command '/{command.UnknownCommandName}'. Type /help.";
 				default:
 					return "Unsupported command.";
+			}
+			}
+			catch (Exception ex)
+			{
+				AiChatLog.Error(ex, $"service command={command.Kind} failed elapsedMs={stopwatch.ElapsedMilliseconds}");
+				throw;
+			}
+			finally
+			{
+				AiChatLog.Info($"service command={command.Kind} finished elapsedMs={stopwatch.ElapsedMilliseconds}");
 			}
 		}
 
@@ -127,6 +143,7 @@ namespace ICSharpCode.ILSpy.AIChat
 				return "Prompt is empty.";
 			}
 
+			AiChatLog.Info($"ask mode begin promptLength={prompt.Length}");
 			if (onProgress != null)
 			{
 				await onProgress("Collecting ILSpy context...\n");
@@ -159,7 +176,9 @@ namespace ICSharpCode.ILSpy.AIChat
 				await onProgress("Sending request to Codex...\n");
 			}
 
-			return await codexClient.AskAsync(fullPrompt.ToString(), onProgress, cancellationToken);
+			var response = await codexClient.AskAsync(fullPrompt.ToString(), onProgress, cancellationToken);
+			AiChatLog.Info($"ask mode finished responseLength={(response?.Length ?? 0)}");
+			return response ?? string.Empty;
 		}
 
 		private async Task<string> AutoAsync(string goal, Func<string, Task>? onProgress, CancellationToken cancellationToken)
@@ -168,6 +187,7 @@ namespace ICSharpCode.ILSpy.AIChat
 			{
 				return "Usage: /auto <goal>";
 			}
+			AiChatLog.Info($"auto mode begin goalLength={goal.Length}");
 			var state = string.Empty;
 			var step = 0;
 			var initialContext = await BuildInitialAutoContextSnapshotAsync(cancellationToken);
@@ -199,9 +219,11 @@ namespace ICSharpCode.ILSpy.AIChat
 					await onProgress("Final answer generated.\n");
 				}
 
-					return string.IsNullOrWhiteSpace(cleaned)
+					var finalText = string.IsNullOrWhiteSpace(cleaned)
 						? "Auto mode finished without a final response."
 						: cleaned.Trim();
+					AiChatLog.Info($"auto mode finished step={step} finalLength={finalText.Length}");
+					return finalText;
 				}
 
 				if (onProgress != null)
@@ -210,6 +232,7 @@ namespace ICSharpCode.ILSpy.AIChat
 				}
 
 				var toolResult = await toolDispatcher.ExecuteAsync(toolCall.Name, toolCall.Mode, toolCall.Term, toolCall.Index, toolCall.Arguments, cancellationToken);
+				AiChatLog.Info($"auto step={step} tool={toolCall.Name} success={toolResult.Success} outputLength={(toolResult.Output?.Length ?? 0)}");
 				if (onProgress != null)
 				{
 					await onProgress($"Tool result ({toolCall.Name}):\n");
@@ -221,7 +244,7 @@ namespace ICSharpCode.ILSpy.AIChat
 					return $"Tool '{toolCall.Name}' failed: {toolResult.Output}";
 				}
 
-				var toolOutputForState = toolResult.Output;
+				var toolOutputForState = toolResult.Output ?? string.Empty;
 				if (toolOutputForState.Length > AutoStateMaxChunkLength)
 				{
 					toolOutputForState = toolOutputForState.Substring(0, AutoStateMaxChunkLength) + Environment.NewLine + "... [truncated for context budget]";

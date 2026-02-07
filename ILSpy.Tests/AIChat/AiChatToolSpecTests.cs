@@ -23,6 +23,7 @@ namespace ICSharpCode.ILSpy.Tests.AIChat
 			Assert.That(spec, Does.Contain("- decompile_many(targets, window?)"));
 			Assert.That(spec, Does.Contain("- read_result_window(index, window?)"));
 			Assert.That(spec, Does.Contain("- continue_output(continue_token)"));
+			Assert.That(spec, Does.Contain("take"));
 			Assert.That(spec, Does.Contain("window ="));
 			Assert.That(spec, Does.Contain("maxLines"));
 			Assert.That(spec, Does.Contain("maxChars"));

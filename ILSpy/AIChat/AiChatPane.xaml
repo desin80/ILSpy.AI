@@ -144,6 +144,8 @@
 				 Grid.Row="1"
 				 IsReadOnly="True"
 				 IsDocumentEnabled="True"
+				 IsUndoEnabled="False"
+				 SpellCheck.IsEnabled="False"
 				 BorderThickness="1"
 				 BorderBrush="{DynamicResource {x:Static SystemColors.ControlLightBrushKey}}"
 				 Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"

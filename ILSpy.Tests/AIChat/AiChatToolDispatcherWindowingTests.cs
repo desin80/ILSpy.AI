@@ -1,3 +1,5 @@
+using System.Linq;
+
 using ICSharpCode.ILSpy.AIChat;
 
 using NUnit.Framework;
@@ -94,6 +96,48 @@ namespace ICSharpCode.ILSpy.Tests.AIChat
 			slice.HasMore.ShouldBeFalse();
 			slice.NextStartLine.ShouldBe(-1);
 			slice.Text.ShouldBe("B" + System.Environment.NewLine + "C" + System.Environment.NewLine + "D");
+		}
+
+		[Test]
+		public void SliceTextWindow_LargeContent_CanBeReadContinuouslyByWindow()
+		{
+			const int total = 10000;
+			var text = string.Join("\n", Enumerable.Range(1, total).Select(i => "L" + i));
+
+			var start = 1;
+			var visited = 0;
+			var safety = 0;
+			while (true)
+			{
+				safety++;
+				safety.ShouldBeLessThan(1000);
+
+				var slice = AiChatToolDispatcher.SliceTextWindow(text, startLine: start, lineCount: 500);
+				visited += slice.ReturnedLineCount;
+
+				if (!slice.HasMore)
+				{
+					break;
+				}
+
+				start = slice.NextStartLine;
+			}
+
+			visited.ShouldBe(total);
+		}
+
+		[Test]
+		public void NormalizeDecompileManyQueryTake_UsesDefaultWhenMissing()
+		{
+			AiChatToolDispatcher.NormalizeDecompileManyQueryTake(null).ShouldBe(3);
+		}
+
+		[Test]
+		public void NormalizeDecompileManyQueryTake_ClampsToValidRange()
+		{
+			AiChatToolDispatcher.NormalizeDecompileManyQueryTake(0).ShouldBe(1);
+			AiChatToolDispatcher.NormalizeDecompileManyQueryTake(99).ShouldBe(8);
+			AiChatToolDispatcher.NormalizeDecompileManyQueryTake(5).ShouldBe(5);
 		}
 	}
 }
