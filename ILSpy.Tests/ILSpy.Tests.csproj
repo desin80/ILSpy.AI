@@ -42,6 +42,10 @@
 
   <ItemGroup>
     <Compile Include="AIChat\AiChatCommandParserTests.cs" />
+    <Compile Include="AIChat\AiChatPaneMarkdownRenderTests.cs" />
+    <Compile Include="AIChat\AiChatLinkNavigatorTests.cs" />
+    <Compile Include="AIChat\AiChatLinkReferenceParserTests.cs" />
+    <Compile Include="AIChat\AiChatMarkdownRendererTests.cs" />
     <Compile Include="AIChat\AiChatPaneXamlTests.cs" />
     <Compile Include="AIChat\AiChatSettingsPersistenceTests.cs" />
     <Compile Include="AIChat\AiChatToolCallParserTests.cs" />

@@ -23,6 +23,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -167,9 +169,10 @@ namespace ICSharpCode.ILSpy.AIChat
 						}
 
 						Interlocked.Exchange(ref hasReceivedOutput, 1);
-						var chunk = new string(buffer, 0, count);
-						outputBuilder.Append(chunk);
-						await onPartialResponse(chunk);
+						outputBuilder.Append(buffer, 0, count);
+						// Do not stream raw Codex CLI stdout to UI.
+						// The CLI may output runtime transcript/debug lines (workdir/model/tokens used)
+						// that should never be shown as assistant content.
 					}
 				}
 
@@ -194,20 +197,61 @@ namespace ICSharpCode.ILSpy.AIChat
 				var lastMessage = TryReadOutputLastMessage(outputLastMessagePath);
 				if (!string.IsNullOrWhiteSpace(lastMessage))
 				{
-					AiChatLog.Info($"codex ask success source=outfile length={lastMessage.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
-					return lastMessage;
+					var normalizedFromOutfile = NormalizeCodexResponsePayload(lastMessage);
+					if (!string.IsNullOrWhiteSpace(normalizedFromOutfile))
+					{
+						AiChatLog.Info($"codex ask success source=outfile length={normalizedFromOutfile.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
+						return normalizedFromOutfile;
+					}
+
+					AiChatLog.Warn($"codex outfile contained no assistant payload length={lastMessage.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
 				}
 
 				if (!string.IsNullOrWhiteSpace(output))
 				{
-					var normalized = ExtractAssistantMessageFromTranscript(output);
+					var structured = ExtractAssistantMessageFromJsonEvents(output);
+					if (!string.IsNullOrWhiteSpace(structured))
+					{
+						var structuredNormalized = NormalizeCodexResponsePayload(structured);
+						if (!string.IsNullOrWhiteSpace(structuredNormalized)
+							&& !LooksLikeCodexTranscript(structuredNormalized)
+							&& !ContainsRuntimeTranscriptMarkers(structuredNormalized))
+						{
+							AiChatLog.Info($"codex ask success source=json-events length={structuredNormalized.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
+							return structuredNormalized;
+						}
+					}
+
+					var normalized = NormalizeCodexResponsePayload(output);
 					if (string.IsNullOrWhiteSpace(normalized) && LooksLikeCodexTranscript(output))
 					{
 						AiChatLog.Warn($"codex transcript parse failed length={output.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
-						return "Codex returned a transcript but no final assistant message. Please retry, narrow the request, or reduce context.";
+						return "Codex returned runtime transcript without a final assistant message. Please continue from current context without replaying prior steps.";
 					}
 
-					var finalText = string.IsNullOrWhiteSpace(normalized) ? output : normalized;
+					if (LooksLikeCodexTranscript(output))
+					{
+						var leakedSignals = new[] { "mcp startup:", "thinking", "tokens used" };
+						if (leakedSignals.Any(signal => normalized.Contains(signal, StringComparison.OrdinalIgnoreCase)))
+						{
+							AiChatLog.Warn($"codex transcript leak detected; suppressing output length={normalized.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
+							return "Codex returned runtime transcript instead of final assistant message. Please retry once; if it persists, reduce context or switch to /ask mode.";
+						}
+					}
+
+					var finalText = string.IsNullOrWhiteSpace(normalized) ? string.Empty : normalized;
+					if (LooksLikeCodexTranscript(finalText) || ContainsRuntimeTranscriptMarkers(finalText))
+					{
+						AiChatLog.Warn($"codex runtime transcript blocked length={finalText.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
+						return "Codex returned runtime transcript instead of final assistant message. Please continue from current context without replaying prior steps.";
+					}
+
+					if (string.IsNullOrWhiteSpace(finalText))
+					{
+						AiChatLog.Warn($"codex empty assistant payload after normalization stdoutLength={output.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
+						return "Codex finished but produced no parseable assistant message. Please continue from current context without replaying prior steps.";
+					}
+
 					AiChatLog.Info($"codex ask success source=stdout length={finalText.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
 					return finalText;
 				}
@@ -273,7 +317,7 @@ namespace ICSharpCode.ILSpy.AIChat
 				return string.Empty;
 			}
 
-			var text = NormalizeLineEndings(output).Trim();
+			var text = SanitizeCliOutput(output);
 			if (!text.StartsWith("OpenAI Codex", StringComparison.OrdinalIgnoreCase))
 			{
 				return text;
@@ -310,14 +354,338 @@ namespace ICSharpCode.ILSpy.AIChat
 			return extracted;
 		}
 
+		private static string NormalizeCodexResponsePayload(string output)
+		{
+			if (string.IsNullOrWhiteSpace(output))
+			{
+				return string.Empty;
+			}
+
+			var text = SanitizeCliOutput(output);
+			var schemaMessage = TryExtractSchemaMessage(text);
+			if (!string.IsNullOrWhiteSpace(schemaMessage))
+			{
+				text = schemaMessage;
+			}
+
+			if (!LooksLikeCodexTranscript(text))
+			{
+				return text;
+			}
+
+			var assistantMessage = ExtractAssistantMessageFromTranscript(text);
+			if (!string.IsNullOrWhiteSpace(assistantMessage))
+			{
+				return assistantMessage;
+			}
+
+			var toolCallBlock = TryExtractLastToolCallBlock(text);
+			if (!string.IsNullOrWhiteSpace(toolCallBlock))
+			{
+				return toolCallBlock;
+			}
+
+			return string.Empty;
+		}
+
+		private static string TryExtractSchemaMessage(string text)
+		{
+			if (string.IsNullOrWhiteSpace(text))
+			{
+				return string.Empty;
+			}
+
+			if (!(text.StartsWith("{", StringComparison.Ordinal) && text.EndsWith("}", StringComparison.Ordinal)))
+			{
+				return string.Empty;
+			}
+
+			try
+			{
+				using var doc = JsonDocument.Parse(text);
+				if (doc.RootElement.ValueKind == JsonValueKind.Object
+					&& doc.RootElement.TryGetProperty("message", out var message)
+					&& message.ValueKind == JsonValueKind.String)
+				{
+					return message.GetString() ?? string.Empty;
+				}
+			}
+			catch
+			{
+				// not schema envelope
+			}
+
+			return string.Empty;
+		}
+
+		private static string TryExtractLastToolCallBlock(string transcript)
+		{
+			if (string.IsNullOrWhiteSpace(transcript))
+			{
+				return string.Empty;
+			}
+
+			var matches = Regex.Matches(transcript, "<tool_call>\\s*[\\s\\S]*?\\s*</tool_call>", RegexOptions.IgnoreCase);
+			if (matches.Count == 0)
+			{
+				return string.Empty;
+			}
+
+			return matches[^1].Value.Trim();
+		}
+
+		private static string ExtractAssistantMessageFromJsonEvents(string stdout)
+		{
+			if (string.IsNullOrWhiteSpace(stdout))
+			{
+				return string.Empty;
+			}
+
+			string? lastCandidate = null;
+			foreach (var rawLine in NormalizeLineEndings(stdout).Split('\n'))
+			{
+				var line = rawLine?.Trim();
+				if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("{", StringComparison.Ordinal) || !line.EndsWith("}", StringComparison.Ordinal))
+				{
+					continue;
+				}
+
+				try
+				{
+					using var doc = JsonDocument.Parse(line);
+					if (TryExtractAssistantTextFromJsonElement(doc.RootElement, out var text) && !string.IsNullOrWhiteSpace(text))
+					{
+						lastCandidate = text.Trim();
+					}
+				}
+				catch
+				{
+					// ignore non-JSONL lines
+				}
+			}
+
+			return lastCandidate ?? string.Empty;
+		}
+
+		private static bool TryExtractAssistantTextFromJsonElement(JsonElement element, out string text)
+		{
+			text = string.Empty;
+
+			if (element.ValueKind == JsonValueKind.Object)
+			{
+				var role = TryGetObjectString(element, "role");
+				if (string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase))
+				{
+					if (TryGetMessageText(element, out text))
+					{
+						return true;
+					}
+				}
+
+				foreach (var prop in element.EnumerateObject())
+				{
+					if (TryExtractAssistantTextFromJsonElement(prop.Value, out text))
+					{
+						return true;
+					}
+				}
+			}
+			else if (element.ValueKind == JsonValueKind.Array)
+			{
+				foreach (var item in element.EnumerateArray())
+				{
+					if (TryExtractAssistantTextFromJsonElement(item, out text))
+					{
+						return true;
+					}
+				}
+			}
+
+			return false;
+		}
+
+		private static bool TryGetMessageText(JsonElement obj, out string text)
+		{
+			text = string.Empty;
+
+			foreach (var field in new[] { "last_message", "message", "content", "output_text", "text", "value" })
+			{
+				if (!obj.TryGetProperty(field, out var value))
+				{
+					continue;
+				}
+
+				if (value.ValueKind == JsonValueKind.String)
+				{
+					text = value.GetString() ?? string.Empty;
+					if (!string.IsNullOrWhiteSpace(text))
+					{
+						return true;
+					}
+				}
+
+				if (value.ValueKind == JsonValueKind.Array)
+				{
+					var parts = new List<string>();
+					foreach (var item in value.EnumerateArray())
+					{
+						if (item.ValueKind == JsonValueKind.String)
+						{
+							parts.Add(item.GetString() ?? string.Empty);
+							continue;
+						}
+
+						if (item.ValueKind == JsonValueKind.Object)
+						{
+							if (item.TryGetProperty("text", out var textProp) && textProp.ValueKind == JsonValueKind.String)
+							{
+								parts.Add(textProp.GetString() ?? string.Empty);
+								continue;
+							}
+
+							if (item.TryGetProperty("value", out var valueProp) && valueProp.ValueKind == JsonValueKind.String)
+							{
+								parts.Add(valueProp.GetString() ?? string.Empty);
+								continue;
+							}
+
+							if (TryGetMessageText(item, out var nested))
+							{
+								parts.Add(nested);
+							}
+						}
+					}
+
+					text = string.Join("", parts.Where(part => !string.IsNullOrWhiteSpace(part))).Trim();
+					if (!string.IsNullOrWhiteSpace(text))
+					{
+						return true;
+					}
+				}
+
+				if (value.ValueKind == JsonValueKind.Object && TryGetMessageText(value, out text) && !string.IsNullOrWhiteSpace(text))
+				{
+					return true;
+				}
+			}
+
+			return false;
+		}
+
+		private static string? TryGetObjectString(JsonElement obj, string propertyName)
+		{
+			if (obj.ValueKind != JsonValueKind.Object || !obj.TryGetProperty(propertyName, out var prop) || prop.ValueKind != JsonValueKind.String)
+			{
+				return null;
+			}
+
+			return prop.GetString();
+		}
+
 		private static bool LooksLikeCodexTranscript(string output)
 		{
-			return NormalizeLineEndings(output).TrimStart().StartsWith("OpenAI Codex", StringComparison.OrdinalIgnoreCase);
+			var text = SanitizeCliOutput(output);
+			if (string.IsNullOrWhiteSpace(text))
+			{
+				return false;
+			}
+
+			var score = 0;
+			if (text.Contains("OpenAI Codex", StringComparison.OrdinalIgnoreCase))
+			{
+				score += 2;
+			}
+
+			if (Regex.IsMatch(text, "(?im)^workdir:\\s+"))
+			{
+				score++;
+			}
+
+			if (Regex.IsMatch(text, "(?im)^model:\\s+"))
+			{
+				score++;
+			}
+
+			if (Regex.IsMatch(text, "(?im)^provider:\\s+"))
+			{
+				score++;
+			}
+
+			if (Regex.IsMatch(text, "(?im)^approval:\\s+"))
+			{
+				score++;
+			}
+
+			if (Regex.IsMatch(text, "(?im)^sandbox:\\s+"))
+			{
+				score++;
+			}
+
+			if (text.Contains("mcp startup:", StringComparison.OrdinalIgnoreCase))
+			{
+				score++;
+			}
+
+			if (text.Contains("tokens used", StringComparison.OrdinalIgnoreCase))
+			{
+				score++;
+			}
+
+			if (text.Contains("You are an autonomous ILSpy analysis agent.", StringComparison.OrdinalIgnoreCase))
+			{
+				score += 2;
+			}
+
+			return score >= 3;
+		}
+
+		private static bool ContainsRuntimeTranscriptMarkers(string output)
+		{
+			var text = SanitizeCliOutput(output);
+			if (string.IsNullOrWhiteSpace(text))
+			{
+				return false;
+			}
+
+			var markers = 0;
+			if (text.Contains("mcp startup:", StringComparison.OrdinalIgnoreCase))
+			{
+				markers++;
+			}
+
+			if (Regex.IsMatch(text, "(?im)^thinking\\s*$"))
+			{
+				markers++;
+			}
+
+			if (text.Contains("tokens used", StringComparison.OrdinalIgnoreCase))
+			{
+				markers++;
+			}
+
+			if (Regex.IsMatch(text, "(?im)^workdir:\\s+") && Regex.IsMatch(text, "(?im)^model:\\s+"))
+			{
+				markers++;
+			}
+
+			return markers >= 2;
 		}
 
 		private static string NormalizeLineEndings(string text)
 		{
 			return text.Replace("\r\n", "\n").Replace('\r', '\n');
+		}
+
+		private static string SanitizeCliOutput(string text)
+		{
+			if (string.IsNullOrWhiteSpace(text))
+			{
+				return string.Empty;
+			}
+
+			var noAnsi = Regex.Replace(text, "\\x1B\\[[0-9;?]*[ -/]*[@-~]", string.Empty);
+			var noBom = noAnsi.Replace("\uFEFF", string.Empty).Replace("\0", string.Empty);
+			return NormalizeLineEndings(noBom).Trim();
 		}
 
 		private static string GetCodexExecutable()
@@ -408,6 +776,17 @@ namespace ICSharpCode.ILSpy.AIChat
 
 			args.Add("exec");
 			args.Add("--skip-git-repo-check");
+			args.Add("--json");
+			args.Add("--color");
+			args.Add("never");
+
+			var schemaPath = EnsureOutputSchemaFile();
+			if (!string.IsNullOrWhiteSpace(schemaPath))
+			{
+				args.Add("--output-schema");
+				args.Add(schemaPath);
+			}
+
 			if (!string.IsNullOrWhiteSpace(outputLastMessagePath))
 			{
 				args.Add("-o");
@@ -416,6 +795,25 @@ namespace ICSharpCode.ILSpy.AIChat
 			args.Add("-");
 
 			return string.Join(" ", args.Select(QuoteArgument));
+		}
+
+		private static string EnsureOutputSchemaFile()
+		{
+			try
+			{
+				var schemaPath = Path.Combine(Path.GetTempPath(), "ilspy-codex-output-schema.json");
+				const string schemaJson = "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"additionalProperties\":false}";
+				if (!File.Exists(schemaPath) || !string.Equals(File.ReadAllText(schemaPath, Encoding.UTF8), schemaJson, StringComparison.Ordinal))
+				{
+					File.WriteAllText(schemaPath, schemaJson, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+				}
+
+				return schemaPath;
+			}
+			catch
+			{
+				return string.Empty;
+			}
 		}
 
 		private static IEnumerable<string> SplitArguments(string input)

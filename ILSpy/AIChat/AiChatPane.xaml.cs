@@ -30,6 +30,7 @@ using System.Windows.Documents;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using System;
+using System.Text;
 
 using TomsToolbox.Wpf.Composition.AttributedModel;
 
@@ -60,11 +61,18 @@ namespace ICSharpCode.ILSpy.AIChat
 		private AiChatPaneModel? observedModel;
 		private readonly Dictionary<string, bool> stepExpansionStates = new();
 		private readonly Dictionary<TextBlock, string> animatedPlanningHeaders = new();
+		private readonly AiChatLinkReferenceParser linkReferenceParser;
+		private readonly AiChatLinkNavigator linkNavigator;
+		private readonly AiChatMarkdownRenderer markdownRenderer;
 		private DispatcherTimer? waitingAnimationTimer;
 		private int waitingAnimationFrame;
 
 		public AiChatPane()
 		{
+			linkReferenceParser = new AiChatLinkReferenceParser();
+			linkNavigator = new AiChatLinkNavigator();
+			markdownRenderer = new AiChatMarkdownRenderer(linkReferenceParser, OnMarkdownReferenceClick, e => MessageTextBox_PreviewMouseWheel(this, e));
+
 			InitializeComponent();
 			DataContextChanged += AiChatPane_DataContextChanged;
 			Unloaded += AiChatPane_Unloaded;
@@ -134,7 +142,10 @@ namespace ICSharpCode.ILSpy.AIChat
 				}
 				else
 				{
-					document.Blocks.Add(CreateParagraph(message));
+					foreach (var block in markdownRenderer.Render(message))
+					{
+						document.Blocks.Add(block);
+					}
 				}
 			}
 
@@ -180,8 +191,6 @@ namespace ICSharpCode.ILSpy.AIChat
 				Foreground = foreground,
 			});
 
-			ApplySemanticStyling(paragraph, message);
-
 			return paragraph;
 		}
 
@@ -200,12 +209,15 @@ namespace ICSharpCode.ILSpy.AIChat
 			var result = new List<Block>();
 			if (!string.IsNullOrWhiteSpace(parsed.Prefix))
 			{
-				result.Add(CreateParagraph(new AiChatMessage {
+				foreach (var block in markdownRenderer.Render(new AiChatMessage {
 					Id = message.Id,
 					Role = message.Role,
 					Timestamp = message.Timestamp,
 					Text = parsed.Prefix.Trim(),
-				}));
+				}))
+				{
+					result.Add(block);
+				}
 			}
 
 			for (var i = 0; i < parsed.Steps.Count; i++)
@@ -369,29 +381,8 @@ namespace ICSharpCode.ILSpy.AIChat
 				? normalizedContent.Substring(0, LargeSectionPreviewChars) + Environment.NewLine + "... [collapsed preview]"
 				: normalizedContent;
 
-			var editor = new TextBox {
-				Text = previewText,
-				IsReadOnly = true,
-				AcceptsReturn = true,
-				TextWrapping = TextWrapping.Wrap,
-				VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-				HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-				Background = Brushes.Transparent,
-				BorderThickness = new Thickness(0),
-				Padding = new Thickness(0),
-				Foreground = bodyBrush,
-				Margin = new Thickness(4, 0, 0, 8),
-				FontSize = 12,
-				IsUndoEnabled = false,
-			};
-			SpellCheck.SetIsEnabled(editor, false);
-
-			if (large)
-			{
-				editor.MaxHeight = StepDetailsMaxHeight;
-			}
-
-			host.Children.Add(editor);
+			var viewer = CreateMarkdownSectionViewer(previewText, large, bodyBrush);
+			host.Children.Add(viewer);
 
 			if (!hasPreview)
 			{
@@ -412,11 +403,51 @@ namespace ICSharpCode.ILSpy.AIChat
 			toggle.Click += (_, _) =>
 			{
 				expanded = !expanded;
-				editor.Text = expanded ? normalizedContent : previewText;
+				viewer.Document = BuildMarkdownSectionDocument(expanded ? normalizedContent : previewText, bodyBrush);
 				toggle.Content = expanded ? "Show preview" : "Show full";
 			};
 
 			host.Children.Add(toggle);
+		}
+
+		private RichTextBox CreateMarkdownSectionViewer(string text, bool large, Brush bodyBrush)
+		{
+			var viewer = new RichTextBox {
+				Document = BuildMarkdownSectionDocument(text, bodyBrush),
+				IsReadOnly = true,
+				IsDocumentEnabled = true,
+				VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+				HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+				Background = Brushes.Transparent,
+				BorderThickness = new Thickness(0),
+				Padding = new Thickness(0),
+				Foreground = bodyBrush,
+				Margin = new Thickness(4, 0, 0, 8),
+				FontSize = 12,
+			};
+
+			if (large)
+			{
+				viewer.MaxHeight = StepDetailsMaxHeight;
+			}
+
+			viewer.PreviewMouseWheel += MessageTextBox_PreviewMouseWheel;
+			return viewer;
+		}
+
+		private FlowDocument BuildMarkdownSectionDocument(string text, Brush foreground)
+		{
+			var document = new FlowDocument {
+				PagePadding = new Thickness(0),
+			};
+
+			foreach (var block in markdownRenderer.RenderBody(text))
+			{
+				document.Blocks.Add(block);
+			}
+
+			document.Foreground = foreground;
+			return document;
 		}
 
 		private static string BuildStepHeader(AutoStepRender step)
@@ -582,51 +613,6 @@ namespace ICSharpCode.ILSpy.AIChat
 			return buffer + Environment.NewLine + line;
 		}
 
-		private static void ApplySemanticStyling(Paragraph paragraph, AiChatMessage message)
-		{
-			if (string.IsNullOrWhiteSpace(message.Text))
-				return;
-
-			var isDark = IsDarkTheme();
-
-			var text = message.Text;
-			if (text.StartsWith("=== Step", StringComparison.OrdinalIgnoreCase))
-			{
-				paragraph.Foreground = isDark
-					? new SolidColorBrush(Color.FromRgb(255, 215, 135))
-					: new SolidColorBrush(Color.FromRgb(144, 86, 0));
-				paragraph.FontWeight = FontWeights.Normal;
-			}
-			else if (text.Contains("Planning next action", StringComparison.OrdinalIgnoreCase))
-			{
-				paragraph.Foreground = isDark
-					? new SolidColorBrush(Color.FromRgb(178, 207, 255))
-					: new SolidColorBrush(Color.FromRgb(22, 86, 156));
-			}
-			else if (text.Contains("Thinking:", StringComparison.OrdinalIgnoreCase))
-			{
-				paragraph.Foreground = isDark
-					? new SolidColorBrush(Color.FromRgb(133, 195, 255))
-					: new SolidColorBrush(Color.FromRgb(0, 89, 163));
-			}
-			else if (text.Contains("Tool call:", StringComparison.OrdinalIgnoreCase) || text.Contains("Tool result:", StringComparison.OrdinalIgnoreCase))
-			{
-				paragraph.Foreground = isDark
-					? new SolidColorBrush(Color.FromRgb(148, 220, 140))
-					: new SolidColorBrush(Color.FromRgb(28, 112, 59));
-				if (text.Contains("Tool call:", StringComparison.OrdinalIgnoreCase))
-				{
-					paragraph.FontWeight = FontWeights.Normal;
-				}
-			}
-			else if (message.Role == AiChatMessageRole.Assistant)
-			{
-				paragraph.Foreground = isDark
-					? new SolidColorBrush(Color.FromRgb(230, 230, 230))
-					: new SolidColorBrush(Color.FromRgb(28, 28, 28));
-			}
-		}
-
 		private static string GetRoleText(AiChatMessageRole role)
 		{
 			return role switch
@@ -772,6 +758,144 @@ namespace ICSharpCode.ILSpy.AIChat
 
 		private void MessageTextBox_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
 		{
+		}
+
+		private void OnMarkdownReferenceClick(AiChatLinkReference reference)
+		{
+			try
+			{
+				var result = linkNavigator.Navigate(reference);
+				if (result.Success)
+				{
+					return;
+				}
+
+				if (result.Candidates.Count > 0)
+				{
+					if (TryShowCandidateSelectionDialog(result.Message, result.Candidates, out var selectedReference) && selectedReference != null)
+					{
+						var forwardedReference = selectedReference with {
+							Line = selectedReference.Line ?? reference.Line,
+							Column = selectedReference.Column ?? reference.Column,
+						};
+						OnMarkdownReferenceClick(forwardedReference);
+					}
+
+					return;
+				}
+
+				var detail = result.Message;
+				AiChatLog.Warn("Link navigation failed: " + detail.Replace(Environment.NewLine, " | "));
+				MessageBox.Show(detail, "AI Chat", MessageBoxButton.OK, MessageBoxImage.Information);
+			}
+			catch (Exception ex)
+			{
+				AiChatLog.Error(ex, "link navigation error");
+				MessageBox.Show(ex.Message, "AI Chat", MessageBoxButton.OK, MessageBoxImage.Warning);
+			}
+		}
+
+		private bool TryShowCandidateSelectionDialog(string message, IReadOnlyList<AiChatLinkNavigationCandidate> candidates, out AiChatLinkReference? selectedReference)
+		{
+			AiChatLinkReference? picked = null;
+			selectedReference = null;
+			if (candidates.Count == 0)
+			{
+				return false;
+			}
+
+			var listView = new ListView {
+				Margin = new Thickness(0, 8, 0, 8),
+				MinWidth = 920,
+				MinHeight = 260,
+				MaxHeight = 520,
+				ItemsSource = candidates,
+			};
+
+			listView.View = new GridView {
+				Columns = {
+					new GridViewColumn {
+						Header = "Name",
+						DisplayMemberBinding = new System.Windows.Data.Binding(nameof(AiChatLinkNavigationCandidate.Name)),
+						Width = 280,
+					},
+					new GridViewColumn {
+						Header = "Location",
+						DisplayMemberBinding = new System.Windows.Data.Binding(nameof(AiChatLinkNavigationCandidate.Location)),
+						Width = 390,
+					},
+					new GridViewColumn {
+						Header = "Assembly",
+						DisplayMemberBinding = new System.Windows.Data.Binding(nameof(AiChatLinkNavigationCandidate.Assembly)),
+						Width = 220,
+					},
+				},
+			};
+
+			var tip = new TextBlock {
+				Text = "Double-click a row to jump.",
+				TextWrapping = TextWrapping.Wrap,
+				Margin = new Thickness(0),
+				FontSize = 12,
+			};
+
+			var tipBorder = new Border {
+				BorderBrush = GetThemeBrush(SystemColors.ControlDarkBrushKey, Color.FromRgb(140, 140, 140)),
+				BorderThickness = new Thickness(1),
+				Background = GetThemeBrush(SystemColors.ControlLightLightBrushKey, Color.FromRgb(246, 246, 246)),
+				Padding = new Thickness(8, 6, 8, 6),
+				Margin = new Thickness(0, 0, 0, 6),
+				Child = tip,
+			};
+
+			var panel = new DockPanel {
+				LastChildFill = true,
+			};
+			DockPanel.SetDock(tipBorder, Dock.Top);
+			panel.Children.Add(tipBorder);
+			panel.Children.Add(listView);
+
+			var window = new Window {
+				Title = "AI Chat - Select Symbol",
+				WindowStartupLocation = WindowStartupLocation.CenterOwner,
+				ResizeMode = ResizeMode.CanResize,
+				SizeToContent = SizeToContent.WidthAndHeight,
+				MinWidth = 980,
+				MinHeight = 360,
+				Content = panel,
+			};
+
+			if (Application.Current?.MainWindow != null)
+			{
+				window.Owner = Application.Current.MainWindow;
+			}
+
+			listView.MouseDoubleClick += (_, _) => {
+				if (listView.SelectedItem is AiChatLinkNavigationCandidate selected)
+				{
+					picked = selected.Reference;
+					window.DialogResult = picked != null;
+				}
+			};
+
+			listView.KeyDown += (_, eventArgs) => {
+				if (eventArgs.Key == Key.Enter && listView.SelectedItem is AiChatLinkNavigationCandidate selected)
+				{
+					picked = selected.Reference;
+					window.DialogResult = picked != null;
+					eventArgs.Handled = true;
+				}
+			};
+
+			if (!string.IsNullOrWhiteSpace(message))
+			{
+				tip.Text = message.Trim().TrimEnd('.') + " — double-click a row to jump.";
+			}
+
+			listView.SelectedIndex = 0;
+			var accepted = window.ShowDialog() == true;
+			selectedReference = picked;
+			return accepted && selectedReference != null;
 		}
 
 		private sealed class AutoProgressParseResult

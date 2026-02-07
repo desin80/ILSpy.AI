@@ -57,6 +57,7 @@ namespace ICSharpCode.ILSpy.AIChat
 		private const int DecompileManyMaxQueryTake = 8;
 		private const int MaxDecompileCacheEntries = 16;
 		private const int MaxDecompileCacheTotalChars = 8_000_000;
+		private const int SmallTextAutoFullReadLineThreshold = 500;
 
 		private static readonly HashSet<string> ChunkedTools = new(StringComparer.OrdinalIgnoreCase) {
 			"assemblies",
@@ -460,16 +461,194 @@ namespace ICSharpCode.ILSpy.AIChat
 				return [];
 			}
 
+			var requestedTerm = term?.Trim() ?? string.Empty;
+			var normalizedQualifiedTerm = NormalizeQualifiedSearchTerm(requestedTerm);
+			var isQualifiedQuery = LooksLikeQualifiedQuery(normalizedQualifiedTerm);
+
 			var results = await searchService.SearchAsync(
 				assemblyTreeModel.AssemblyList,
 				assemblyTreeModel.CurrentLanguage,
 				languageVersion,
 				mode,
-				term,
+				requestedTerm,
 				maxResults,
 				cancellationToken);
 
-			return results.ToArray();
+			if (!isQualifiedQuery)
+			{
+				return results.ToArray();
+			}
+
+			var strictMatches = FilterQualifiedSearchResults(results, mode, normalizedQualifiedTerm);
+			if (strictMatches.Length > 0)
+			{
+				return strictMatches.Take(maxResults).ToArray();
+			}
+
+			var fallbackTerm = BuildQualifiedFallbackTerm(mode, normalizedQualifiedTerm);
+			if (string.IsNullOrWhiteSpace(fallbackTerm) || string.Equals(fallbackTerm, requestedTerm, StringComparison.OrdinalIgnoreCase))
+			{
+				return [];
+			}
+
+			var fallbackResults = await searchService.SearchAsync(
+				assemblyTreeModel.AssemblyList,
+				assemblyTreeModel.CurrentLanguage,
+				languageVersion,
+				mode,
+				fallbackTerm,
+				maxResults,
+				cancellationToken);
+
+			var fallbackStrictMatches = FilterQualifiedSearchResults(fallbackResults, mode, normalizedQualifiedTerm);
+			return fallbackStrictMatches.Take(maxResults).ToArray();
+		}
+
+		private static bool LooksLikeQualifiedQuery(string normalizedTerm)
+		{
+			return !string.IsNullOrWhiteSpace(normalizedTerm)
+				&& normalizedTerm.Contains('.', StringComparison.Ordinal)
+				&& !normalizedTerm.StartsWith("M:", StringComparison.Ordinal)
+				&& !normalizedTerm.StartsWith("T:", StringComparison.Ordinal)
+				&& !normalizedTerm.StartsWith("P:", StringComparison.Ordinal)
+				&& !normalizedTerm.StartsWith("F:", StringComparison.Ordinal)
+				&& !normalizedTerm.StartsWith("E:", StringComparison.Ordinal);
+		}
+
+		private static string NormalizeQualifiedSearchTerm(string term)
+		{
+			if (string.IsNullOrWhiteSpace(term))
+			{
+				return string.Empty;
+			}
+
+			var normalized = term.Trim();
+			var assemblySeparator = normalized.IndexOf("::", StringComparison.Ordinal);
+			if (assemblySeparator > 0 && assemblySeparator + 2 < normalized.Length)
+			{
+				normalized = normalized[(assemblySeparator + 2)..];
+			}
+
+			normalized = normalized.Replace('/', '.').Replace('\\', '.');
+			if (normalized.EndsWith(".decompiled", StringComparison.OrdinalIgnoreCase))
+			{
+				normalized = normalized[..^11];
+			}
+
+			if (normalized.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+			{
+				normalized = normalized[..^3];
+			}
+
+			var parameterStart = normalized.IndexOf('(');
+			if (parameterStart > 0)
+			{
+				normalized = normalized[..parameterStart];
+			}
+
+			while (normalized.Contains("..", StringComparison.Ordinal))
+			{
+				normalized = normalized.Replace("..", ".", StringComparison.Ordinal);
+			}
+
+			return normalized.Trim();
+		}
+
+		private static string BuildQualifiedFallbackTerm(string mode, string normalizedQualifiedTerm)
+		{
+			var separator = normalizedQualifiedTerm.LastIndexOf('.');
+			if (separator < 0 || separator + 1 >= normalizedQualifiedTerm.Length)
+			{
+				return normalizedQualifiedTerm;
+			}
+
+			var tail = normalizedQualifiedTerm[(separator + 1)..];
+			if (string.Equals(mode?.Trim(), "type", StringComparison.OrdinalIgnoreCase) && separator > 0)
+			{
+				return tail;
+			}
+
+			return tail;
+		}
+
+		private static SearchResult[] FilterQualifiedSearchResults(IEnumerable<SearchResult> candidates, string mode, string normalizedQualifiedTerm)
+		{
+			var separator = normalizedQualifiedTerm.LastIndexOf('.');
+			if (separator < 0 || separator + 1 >= normalizedQualifiedTerm.Length)
+			{
+				return [];
+			}
+
+			var expectedContainer = normalizedQualifiedTerm[..separator];
+			var expectedName = normalizedQualifiedTerm[(separator + 1)..];
+			if (string.IsNullOrWhiteSpace(expectedContainer) || string.IsNullOrWhiteSpace(expectedName))
+			{
+				return [];
+			}
+
+			var expectTypeMode = string.Equals(mode?.Trim(), "type", StringComparison.OrdinalIgnoreCase);
+			if (expectTypeMode)
+			{
+				var typeContainerSeparator = expectedContainer.LastIndexOf('.');
+				if (typeContainerSeparator >= 0)
+				{
+					expectedName = expectedContainer[(typeContainerSeparator + 1)..];
+					expectedContainer = expectedContainer[..typeContainerSeparator];
+				}
+			}
+
+			var results = candidates.Where(result => {
+				var location = (result.Location ?? string.Empty).Trim();
+				var simpleName = ExtractSimpleResultName(result.Name);
+				if (!string.Equals(simpleName, expectedName, StringComparison.OrdinalIgnoreCase))
+				{
+					return false;
+				}
+
+				if (string.Equals(location, expectedContainer, StringComparison.OrdinalIgnoreCase))
+				{
+					return true;
+				}
+
+				if (location.EndsWith("." + expectedContainer, StringComparison.OrdinalIgnoreCase))
+				{
+					return true;
+				}
+
+				var fullFromLocation = string.IsNullOrWhiteSpace(location) ? simpleName : location + "." + simpleName;
+				return string.Equals(fullFromLocation, normalizedQualifiedTerm, StringComparison.OrdinalIgnoreCase);
+			}).ToArray();
+
+			return results;
+		}
+
+		private static string ExtractSimpleResultName(string? name)
+		{
+			if (string.IsNullOrWhiteSpace(name))
+			{
+				return string.Empty;
+			}
+
+			var simple = name.Trim();
+			var signatureSeparator = simple.IndexOf(" :", StringComparison.Ordinal);
+			if (signatureSeparator > 0)
+			{
+				simple = simple[..signatureSeparator];
+			}
+
+			var parameterSeparator = simple.IndexOf('(');
+			if (parameterSeparator > 0)
+			{
+				simple = simple[..parameterSeparator];
+			}
+
+			var dotSeparator = simple.LastIndexOf('.');
+			if (dotSeparator >= 0 && dotSeparator + 1 < simple.Length)
+			{
+				simple = simple[(dotSeparator + 1)..];
+			}
+
+			return simple.Trim();
 		}
 
 		private string ReadSelectedWindow(JsonElement? arguments, CancellationToken cancellationToken)
@@ -487,6 +666,7 @@ namespace ICSharpCode.ILSpy.AIChat
 			}
 
 			var slice = SliceTextWindow(rawText, window.StartLine, window.LineCount);
+			slice = ExpandToFullWindowForSmallText(rawText, slice);
 			var builder = new StringBuilder();
 			builder.AppendLine("Selected summary:");
 			builder.AppendLine(selected);
@@ -727,6 +907,7 @@ namespace ICSharpCode.ILSpy.AIChat
 
 			var text = DecompileEntity(entity, cancellationToken);
 			var slice = SliceTextWindow(text, window.StartLine, window.LineCount);
+			slice = ExpandToFullWindowForSmallText(text, slice);
 
 			var builder = new StringBuilder();
 			builder.AppendLine($"result #{resolvedIndex}: {result.Name} | {result.Location} | {result.Assembly}");
@@ -823,6 +1004,7 @@ namespace ICSharpCode.ILSpy.AIChat
 		{
 			var text = DecompileEntity(job.Entity, cancellationToken);
 			var slice = SliceTextWindow(text, window.StartLine, window.LineCount);
+			slice = ExpandToFullWindowForSmallText(text, slice);
 			return new(order, job.Label, job.Entity.FullName, slice);
 		}
 
@@ -984,8 +1166,52 @@ namespace ICSharpCode.ILSpy.AIChat
 			var builder = new StringBuilder();
 			builder.AppendLine($"window: startLine={slice.StartLine}, returnedLineCount={slice.ReturnedLineCount}, totalLines={slice.TotalLines}, hasMore={slice.HasMore.ToString().ToLowerInvariant()}, nextStartLine={nextStartLineText}");
 			builder.AppendLine("content:");
-			builder.Append(string.IsNullOrEmpty(slice.Text) ? "<empty>" : slice.Text);
+			builder.Append(FormatWindowContentWithLineNumbers(slice));
 			return builder.ToString();
+		}
+
+		private static string FormatWindowContentWithLineNumbers(TextWindowSlice slice)
+		{
+			if (string.IsNullOrEmpty(slice.Text))
+			{
+				return "<empty>";
+			}
+
+			var builder = new StringBuilder();
+			using var reader = new System.IO.StringReader(slice.Text);
+			string? line;
+			var currentLine = slice.StartLine;
+			var first = true;
+			while ((line = reader.ReadLine()) != null)
+			{
+				if (!first)
+				{
+					builder.AppendLine();
+				}
+
+				builder.Append(currentLine.ToString().PadLeft(5));
+				builder.Append(": ");
+				builder.Append(line);
+				currentLine++;
+				first = false;
+			}
+
+			return builder.ToString();
+		}
+
+		private static TextWindowSlice ExpandToFullWindowForSmallText(string fullText, TextWindowSlice slice)
+		{
+			if (slice.TotalLines <= 0 || slice.TotalLines > SmallTextAutoFullReadLineThreshold)
+			{
+				return slice;
+			}
+
+			if (slice.StartLine == 1 && slice.ReturnedLineCount >= slice.TotalLines)
+			{
+				return slice;
+			}
+
+			return SliceTextWindow(fullText, 1, slice.TotalLines);
 		}
 
 		internal static TextWindowSlice SliceTextWindow(string text, int startLine, int lineCount)

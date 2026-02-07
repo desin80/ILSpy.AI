@@ -158,6 +158,8 @@ namespace ICSharpCode.ILSpy.AIChat
 			fullPrompt.AppendLine("You are an IL analysis assistant running inside ILSpy.");
 			fullPrompt.AppendLine("Do not output tool_call blocks in this mode.");
 			fullPrompt.AppendLine("Use the supplied context and be explicit when uncertain.");
+			fullPrompt.AppendLine("When mentioning navigable symbols, prefer assembly-qualified id-string like Assembly::M:Namespace.Type.Method(Type).");
+			fullPrompt.AppendLine("Avoid ambiguous short names; include namespace/type/member for deterministic navigation.");
 			fullPrompt.AppendLine();
 			fullPrompt.AppendLine("Current selection:");
 			fullPrompt.AppendLine(context.Output);
@@ -279,6 +281,11 @@ namespace ICSharpCode.ILSpy.AIChat
 			builder.AppendLine("If you can conclude, output final answer without tool_call block.");
 			builder.AppendLine("Prefer batch/window tools (search_many, decompile_many, read_selected_window) to reduce round-trips.");
 			builder.AppendLine("For very large outputs, prefer larger maxLines/maxChars and keep calling continue_output(continue_token) until complete.");
+			builder.AppendLine("For small code (about <=500 lines), read full content in one call instead of repeated small windows.");
+			builder.AppendLine("When citing navigable symbols, prefer fully qualified forms to avoid ambiguity:");
+			builder.AppendLine("- Assembly-qualified id-string: AssemblyName::M:Namespace.Type.Method(Type)");
+			builder.AppendLine("- Or full dotted symbol: Namespace.Type.Method");
+			builder.AppendLine("Avoid bare short names like 'Cloud' unless there is only one clear match.");
 			builder.AppendLine();
 			builder.AppendLine(toolDispatcher.GetToolSpecText());
 			builder.AppendLine();

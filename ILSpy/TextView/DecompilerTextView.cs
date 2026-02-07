@@ -1324,29 +1324,37 @@ namespace ICSharpCode.ILSpy.TextView
 		}
 
 		#region Unfold
-		public void UnfoldAndScroll(int lineNumber)
+		public int LineCount => textEditor.Document?.LineCount ?? 0;
+
+		public bool ScrollToLine(int lineNumber, bool unfold = true)
 		{
 			if (lineNumber <= 0 || lineNumber > textEditor.Document.LineCount)
-				return;
-			if (foldingManager == null)
-				return;
+				return false;
 
-			var line = textEditor.Document.GetLineByNumber(lineNumber);
-
-			// unfold
-			var foldings = foldingManager.GetFoldingsContaining(line.Offset);
-			if (foldings != null)
+			if (unfold && foldingManager != null)
 			{
-				foreach (var folding in foldings)
+				var line = textEditor.Document.GetLineByNumber(lineNumber);
+
+				var foldings = foldingManager.GetFoldingsContaining(line.Offset);
+				if (foldings != null)
 				{
-					if (folding.IsFolded)
+					foreach (var folding in foldings)
 					{
-						folding.IsFolded = false;
+						if (folding.IsFolded)
+						{
+							folding.IsFolded = false;
+						}
 					}
 				}
 			}
-			// scroll to
+
 			textEditor.ScrollTo(lineNumber, 0);
+			return true;
+		}
+
+		public void UnfoldAndScroll(int lineNumber)
+		{
+			ScrollToLine(lineNumber, unfold: true);
 		}
 
 		public FoldingManager? FoldingManager {

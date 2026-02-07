@@ -44,6 +44,7 @@
     <PackageReference Include="McMaster.Extensions.CommandLineUtils" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
     <PackageReference Include="DataGridExtensions" />
+    <PackageReference Include="Markdig" />
     <PackageReference Include="Microsoft.Xaml.Behaviors.Wpf" />
     <PackageReference Include="TomsToolbox.Composition.MicrosoftExtensions" />
     <PackageReference Include="TomsToolbox.Wpf.Composition.AttributedModel" />
@@ -105,11 +106,11 @@
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
-    <NoWarn>$(NoWarn);1701;1702;CA1001;CA2213</NoWarn>
+    <NoWarn>$(NoWarn);1701;1702;CA1001;CA2213;8002</NoWarn>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
-    <NoWarn>$(NoWarn);1701;1702;CA1001;CA2213</NoWarn>
+    <NoWarn>$(NoWarn);1701;1702;CA1001;CA2213;8002</NoWarn>
   </PropertyGroup>
 
   <Import Project="$(VCToolsVersionPropsFile)" Condition="Exists('$(VCToolsVersionPropsFile)')" />
