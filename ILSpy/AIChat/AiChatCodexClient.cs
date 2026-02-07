@@ -77,6 +77,7 @@ namespace ICSharpCode.ILSpy.AIChat
 			}
 
 			Process? process = null;
+			string? outputLastMessagePath = null;
 			var askTimeout = AskTimeout;
 			try
 			{
@@ -85,7 +86,8 @@ namespace ICSharpCode.ILSpy.AIChat
 				var token = timeoutCts.Token;
 
 				var executable = GetCodexExecutable();
-				var arguments = BuildArguments();
+				outputLastMessagePath = Path.Combine(Path.GetTempPath(), $"ilspy-codex-last-{Guid.NewGuid():N}.txt");
+				var arguments = BuildArguments(outputLastMessagePath);
 
 				var psi = new ProcessStartInfo {
 					FileName = executable,
@@ -184,9 +186,16 @@ namespace ICSharpCode.ILSpy.AIChat
 						: $"Codex CLI failed with exit code {process.ExitCode}.{Environment.NewLine}{error}";
 				}
 
+				var lastMessage = TryReadOutputLastMessage(outputLastMessagePath);
+				if (!string.IsNullOrWhiteSpace(lastMessage))
+				{
+					return lastMessage;
+				}
+
 				if (!string.IsNullOrWhiteSpace(output))
 				{
-					return output;
+					var normalized = ExtractAssistantMessageFromTranscript(output);
+					return string.IsNullOrWhiteSpace(normalized) ? output : normalized;
 				}
 
 				return string.IsNullOrWhiteSpace(error) ? "Codex CLI returned no output." : error;
@@ -208,8 +217,72 @@ namespace ICSharpCode.ILSpy.AIChat
 			}
 			finally
 			{
+				try
+				{
+					if (!string.IsNullOrWhiteSpace(outputLastMessagePath) && File.Exists(outputLastMessagePath))
+					{
+						File.Delete(outputLastMessagePath);
+					}
+				}
+				catch
+				{
+					// best effort temp-file cleanup
+				}
+
 				process?.Dispose();
 			}
+		}
+
+		private static string TryReadOutputLastMessage(string? path)
+		{
+			if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+			{
+				return string.Empty;
+			}
+
+			try
+			{
+				return File.ReadAllText(path, Encoding.UTF8).Trim();
+			}
+			catch
+			{
+				return string.Empty;
+			}
+		}
+
+		private static string ExtractAssistantMessageFromTranscript(string output)
+		{
+			if (string.IsNullOrWhiteSpace(output))
+			{
+				return string.Empty;
+			}
+
+			var text = output.Trim();
+			if (!text.StartsWith("OpenAI Codex", StringComparison.OrdinalIgnoreCase))
+			{
+				return text;
+			}
+
+			var assistantMarker = "\nassistant\n";
+			var index = text.LastIndexOf(assistantMarker, StringComparison.OrdinalIgnoreCase);
+			if (index < 0)
+			{
+				return string.Empty;
+			}
+
+			var extracted = text[(index + assistantMarker.Length)..].Trim();
+			if (string.IsNullOrWhiteSpace(extracted))
+			{
+				return string.Empty;
+			}
+
+			var tokensUsedIndex = extracted.LastIndexOf("\ntokens used", StringComparison.OrdinalIgnoreCase);
+			if (tokensUsedIndex >= 0)
+			{
+				extracted = extracted[..tokensUsedIndex].Trim();
+			}
+
+			return extracted;
 		}
 
 		private static string GetCodexExecutable()
@@ -289,7 +362,7 @@ namespace ICSharpCode.ILSpy.AIChat
 			return false;
 		}
 
-		private static string BuildArguments()
+		private static string BuildArguments(string? outputLastMessagePath)
 		{
 			var args = new List<string>();
 			var extra = Environment.GetEnvironmentVariable("ILSPY_CODEX_ARGS");
@@ -300,6 +373,11 @@ namespace ICSharpCode.ILSpy.AIChat
 
 			args.Add("exec");
 			args.Add("--skip-git-repo-check");
+			if (!string.IsNullOrWhiteSpace(outputLastMessagePath))
+			{
+				args.Add("-o");
+				args.Add(outputLastMessagePath);
+			}
 			args.Add("-");
 
 			return string.Join(" ", args.Select(QuoteArgument));

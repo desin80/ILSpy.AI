@@ -255,6 +255,7 @@ namespace ICSharpCode.ILSpy.AIChat
 			builder.AppendLine("Decide your next step. If you need a tool, output exactly one <tool_call> JSON block and nothing else.");
 			builder.AppendLine("If you can conclude, output final answer without tool_call block.");
 			builder.AppendLine("Prefer batch/window tools (search_many, decompile_many, read_selected_window) to reduce round-trips.");
+			builder.AppendLine("For very large outputs, prefer larger maxLines/maxChars and keep calling continue_output(continue_token) until complete.");
 			builder.AppendLine();
 			builder.AppendLine(toolDispatcher.GetToolSpecText());
 			builder.AppendLine();

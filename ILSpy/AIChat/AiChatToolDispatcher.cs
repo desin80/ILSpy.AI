@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Composition;
 using System.Linq;
@@ -45,14 +46,29 @@ namespace ICSharpCode.ILSpy.AIChat
 	{
 		private const int DefaultWindowStartLine = 1;
 		private const int DefaultWindowLineCount = 500;
+		private const int DefaultChunkMaxLines = 1200;
+		private const int DefaultChunkMaxChars = 60000;
+		private const int MaxContinuationStates = 256;
 		private const int SearchMaxResults = 30;
 		private const int SearchManyMaxConcurrency = 3;
 		private const int DecompileManyMaxConcurrency = 2;
+
+		private static readonly HashSet<string> ChunkedTools = new(StringComparer.OrdinalIgnoreCase) {
+			"assemblies",
+			"selected",
+			"decompile",
+			"read_selected_window",
+			"search",
+			"search_many",
+			"decompile_many",
+			"read_result_window",
+		};
 
 		private readonly AssemblyTreeModel assemblyTreeModel;
 		private readonly AnalyzerTreeViewModel analyzerTreeViewModel;
 		private readonly DockWorkspace dockWorkspace;
 		private readonly AiChatSearchService searchService;
+		private readonly ConcurrentDictionary<string, ContinuationState> continuationStates = new(StringComparer.Ordinal);
 
 		public AiChatToolDispatcher(AssemblyTreeModel assemblyTreeModel, AnalyzerTreeViewModel analyzerTreeViewModel, DockWorkspace dockWorkspace, AiChatSearchService searchService)
 		{
@@ -74,10 +90,13 @@ namespace ICSharpCode.ILSpy.AIChat
 				"- search_many(queries, maxResultsPerQuery?)",
 				"- decompile_many(targets, window?)",
 				"- read_result_window(index, window?)",
+				"- continue_output(continue_token)",
 				"- analyze()",
 				"- open_result(index)",
 				"Notes:",
 				"- window = {\"startLine\":1,\"lineCount\":500}",
+				"- output budget args (optional on text-heavy tools): {\"maxLines\":1200,\"maxChars\":60000}",
+				"- if output is truncated, use continue_output with continue_token",
 				"- search_many queries = [{\"mode\":\"type\",\"term\":\"PromoItemChecker\"}]",
 				"- decompile_many targets = [{\"kind\":\"search_index\",\"index\":1}] or [{\"kind\":\"query\",\"mode\":\"type\",\"term\":\"PromoItemChecker\"}]",
 				"Tool call format:",
@@ -95,39 +114,251 @@ namespace ICSharpCode.ILSpy.AIChat
 		{
 			try
 			{
+				AiChatToolResult result;
+				if (string.Equals(toolName, "continue_output", StringComparison.OrdinalIgnoreCase))
+				{
+					result = new() { Success = true, Output = ContinueOutput(arguments) };
+					return result;
+				}
+
 				switch (toolName)
 				{
 					case "assemblies":
-						return new() { Success = true, Output = await ListAssembliesAsync(cancellationToken) };
+						result = new() { Success = true, Output = await ListAssembliesAsync(cancellationToken) };
+						break;
 					case "selected":
-						return new() { Success = true, Output = GetSelectedText() };
+						result = new() { Success = true, Output = GetSelectedText() };
+						break;
 					case "decompile":
-						return new() { Success = true, Output = DecompileSelectedNode() };
+						result = new() { Success = true, Output = DecompileSelectedNode() };
+						break;
 					case "read_selected_window":
-						return new() { Success = true, Output = ReadSelectedWindow(arguments) };
+						result = new() { Success = true, Output = ReadSelectedWindow(arguments) };
+						break;
 					case "search":
-						return new() { Success = true, Output = await SearchAsync(mode ?? "member", term ?? string.Empty, cancellationToken) };
+						result = new() { Success = true, Output = await SearchAsync(mode ?? "member", term ?? string.Empty, cancellationToken) };
+						break;
 					case "search_many":
-						return new() { Success = true, Output = await SearchManyAsync(arguments, cancellationToken) };
+						result = new() { Success = true, Output = await SearchManyAsync(arguments, cancellationToken) };
+						break;
 					case "decompile_many":
-						return new() { Success = true, Output = await DecompileManyAsync(arguments, cancellationToken) };
+						result = new() { Success = true, Output = await DecompileManyAsync(arguments, cancellationToken) };
+						break;
 					case "read_result_window":
-						return new() { Success = true, Output = ReadResultWindow(index, arguments) };
+						result = new() { Success = true, Output = ReadResultWindow(index, arguments) };
+						break;
 					case "analyze":
-						return new() { Success = true, Output = AnalyzeSelected() };
+						result = new() { Success = true, Output = AnalyzeSelected() };
+						break;
 					case "open_result":
-						return new() { Success = true, Output = OpenSearchResult(index) };
+						result = new() { Success = true, Output = OpenSearchResult(index) };
+						break;
 					default:
-						return new() { Success = false, Output = $"Unknown tool '{toolName}'." };
+						result = new() { Success = false, Output = $"Unknown tool '{toolName}'." };
+						break;
 				}
+
+				if (result.Success)
+				{
+					result = new() {
+						Success = true,
+						Output = ApplyOutputBudgetIfRequested(toolName, result.Output, arguments),
+					};
+				}
+
+				return result;
 			}
 			catch (Exception ex)
 			{
 				return new() { Success = false, Output = ex.Message };
 			}
+			finally
+			{
+				TrimContinuationStates();
+			}
 		}
 
 		private SearchResult[] lastSearchResults = [];
+
+		private string ApplyOutputBudgetIfRequested(string toolName, string output, JsonElement? arguments)
+		{
+			if (!ChunkedTools.Contains(toolName))
+			{
+				return output;
+			}
+
+			var budget = ParseChunkBudget(arguments);
+			var chunk = SliceChunk(output, 0, budget.MaxLines, budget.MaxChars);
+			if (!chunk.HasMore)
+			{
+				return output;
+			}
+
+			var token = CreateContinuationToken(output, chunk.NextLineStart, budget);
+			var builder = new StringBuilder();
+			builder.Append(chunk.Content.TrimEnd());
+			builder.AppendLine();
+			builder.AppendLine();
+			builder.AppendLine($"... [truncated by budget: maxLines={budget.MaxLines}, maxChars={budget.MaxChars}]");
+			builder.AppendLine($"continue_token: {token}");
+			builder.AppendLine("next: use continue_output({\"continue_token\":\"<token>\"})");
+			return builder.ToString().TrimEnd();
+		}
+
+		private string ContinueOutput(JsonElement? arguments)
+		{
+			if (!TryGetContinueToken(arguments, out var token, out var tokenError))
+			{
+				return tokenError;
+			}
+
+			if (!continuationStates.TryGetValue(token, out var state))
+			{
+				return "Invalid or expired continue_token.";
+			}
+
+			state.LastAccessUtc = DateTime.UtcNow;
+			var chunk = SliceChunk(state.FullText, state.NextLineStart, state.Budget.MaxLines, state.Budget.MaxChars);
+			state.NextLineStart = chunk.NextLineStart;
+			if (!chunk.HasMore)
+			{
+				continuationStates.TryRemove(token, out _);
+			}
+
+			var builder = new StringBuilder();
+			builder.Append(chunk.Content.TrimEnd());
+			if (chunk.HasMore)
+			{
+				builder.AppendLine();
+				builder.AppendLine();
+				builder.AppendLine($"... [truncated by budget: maxLines={state.Budget.MaxLines}, maxChars={state.Budget.MaxChars}]");
+				builder.AppendLine($"continue_token: {token}");
+				builder.AppendLine("next: use continue_output({\"continue_token\":\"<token>\"})");
+			}
+
+			return builder.ToString().TrimEnd();
+		}
+
+		private string CreateContinuationToken(string fullText, int nextLineStart, ChunkBudget budget)
+		{
+			var token = $"ct_{Guid.NewGuid():N}";
+			continuationStates[token] = new ContinuationState(fullText, nextLineStart, budget);
+			return token;
+		}
+
+		private static bool TryGetContinueToken(JsonElement? arguments, out string token, out string error)
+		{
+			token = string.Empty;
+			error = string.Empty;
+
+			if (arguments is not { ValueKind: JsonValueKind.Object } argumentObject)
+			{
+				error = "continue_output requires {\"continue_token\":\"...\"}.";
+				return false;
+			}
+
+			if (!argumentObject.TryGetProperty("continue_token", out var tokenElement) || tokenElement.ValueKind != JsonValueKind.String)
+			{
+				error = "continue_output requires string continue_token.";
+				return false;
+			}
+
+			token = tokenElement.GetString() ?? string.Empty;
+			if (string.IsNullOrWhiteSpace(token))
+			{
+				error = "continue_token must not be empty.";
+				return false;
+			}
+
+			return true;
+		}
+
+		private static ChunkBudget ParseChunkBudget(JsonElement? arguments)
+		{
+			var maxLines = DefaultChunkMaxLines;
+			var maxChars = DefaultChunkMaxChars;
+
+			if (arguments is { ValueKind: JsonValueKind.Object } argumentObject)
+			{
+				if (argumentObject.TryGetProperty("maxLines", out var maxLinesElement)
+					&& maxLinesElement.ValueKind == JsonValueKind.Number
+					&& maxLinesElement.TryGetInt32(out var parsedLines))
+				{
+					maxLines = Math.Max(20, Math.Min(10000, parsedLines));
+				}
+
+				if (argumentObject.TryGetProperty("maxChars", out var maxCharsElement)
+					&& maxCharsElement.ValueKind == JsonValueKind.Number
+					&& maxCharsElement.TryGetInt32(out var parsedChars))
+				{
+					maxChars = Math.Max(1000, Math.Min(500000, parsedChars));
+				}
+			}
+
+			return new ChunkBudget(maxLines, maxChars);
+		}
+
+		private static ChunkSlice SliceChunk(string text, int startLineIndex, int maxLines, int maxChars)
+		{
+			var safeText = text ?? string.Empty;
+			var lines = safeText.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+			if (lines.Length == 1 && lines[0].Length == 0)
+			{
+				return new ChunkSlice(string.Empty, false, 0);
+			}
+
+			var start = Math.Max(0, startLineIndex);
+			if (start >= lines.Length)
+			{
+				return new ChunkSlice(string.Empty, false, lines.Length);
+			}
+
+			var builder = new StringBuilder();
+			var count = 0;
+			var cursor = start;
+			for (; cursor < lines.Length && count < maxLines; cursor++)
+			{
+				var line = lines[cursor];
+				var segment = count == 0 ? line : Environment.NewLine + line;
+				if (builder.Length + segment.Length > maxChars)
+				{
+					break;
+				}
+
+				builder.Append(segment);
+				count++;
+			}
+
+			if (count == 0 && cursor < lines.Length)
+			{
+				var firstLine = lines[cursor];
+				var take = Math.Min(maxChars, firstLine.Length);
+				builder.Append(firstLine[..take]);
+				cursor++;
+			}
+
+			var hasMore = cursor < lines.Length;
+			return new ChunkSlice(builder.ToString(), hasMore, cursor);
+		}
+
+		private void TrimContinuationStates()
+		{
+			if (continuationStates.Count <= MaxContinuationStates)
+			{
+				return;
+			}
+
+			var stale = continuationStates
+				.OrderBy(pair => pair.Value.LastAccessUtc)
+				.Take(continuationStates.Count - MaxContinuationStates)
+				.Select(pair => pair.Key)
+				.ToArray();
+
+			foreach (var token in stale)
+			{
+				continuationStates.TryRemove(token, out _);
+			}
+		}
 
 		private async Task<string> ListAssembliesAsync(CancellationToken cancellationToken)
 		{
@@ -190,12 +421,6 @@ namespace ICSharpCode.ILSpy.AIChat
 			{
 				lastSearchResults = [];
 				return "Usage: search(mode, term).";
-			}
-
-			var languageVersion = assemblyTreeModel.CurrentLanguageVersion;
-			if (languageVersion == null)
-			{
-				return "Current language version is unavailable.";
 			}
 
 			lastSearchResults = await SearchCoreAsync(mode, term, SearchMaxResults, cancellationToken);
@@ -862,6 +1087,29 @@ namespace ICSharpCode.ILSpy.AIChat
 		private sealed record SearchManyQueryResult(int QueryIndex, SearchQuery Query, SearchResult[] Results, string? Error);
 
 		private sealed record WindowRequest(int StartLine, int LineCount);
+
+		private sealed record ChunkBudget(int MaxLines, int MaxChars);
+
+		private sealed record ChunkSlice(string Content, bool HasMore, int NextLineStart);
+
+		private sealed class ContinuationState
+		{
+			public ContinuationState(string fullText, int nextLineStart, ChunkBudget budget)
+			{
+				FullText = fullText;
+				NextLineStart = nextLineStart;
+				Budget = budget;
+				LastAccessUtc = DateTime.UtcNow;
+			}
+
+			public string FullText { get; }
+
+			public int NextLineStart { get; set; }
+
+			public ChunkBudget Budget { get; }
+
+			public DateTime LastAccessUtc { get; set; }
+		}
 
 		private sealed record DecompileTargetRequest(string Kind, int? Index, string? Mode, string? Term);
 
