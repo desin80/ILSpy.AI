@@ -20,6 +20,7 @@ using System;
 using System.Composition;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -32,6 +33,8 @@ namespace ICSharpCode.ILSpy.AIChat
 	public sealed class AiChatService
 	{
 		private const int AutoStateMaxChunkLength = 2500;
+		private const int AskSnapshotLineCount = 500;
+		private const int AskAssemblySummaryLimit = 12;
 
 		private readonly AiChatToolDispatcher toolDispatcher;
 		private readonly AiChatCodexClient codexClient;
@@ -130,8 +133,9 @@ namespace ICSharpCode.ILSpy.AIChat
 			}
 
 			var context = await toolDispatcher.ExecuteAsync("selected", null, null, null, cancellationToken);
+			var decompileWindowContext = await toolDispatcher.ExecuteAsync("read_selected_window", null, null, null, CreateWindowArguments(startLine: 1, lineCount: AskSnapshotLineCount), cancellationToken);
 			var assemblyContext = await toolDispatcher.ExecuteAsync("assemblies", null, null, null, cancellationToken);
-			var decompileContext = await toolDispatcher.ExecuteAsync("decompile", null, null, null, cancellationToken);
+			var sparseAssemblyContext = CreateSparseAssembliesSummary(assemblyContext.Output, AskAssemblySummaryLimit);
 
 			var fullPrompt = new StringBuilder();
 			fullPrompt.AppendLine("You are an IL analysis assistant running inside ILSpy.");
@@ -141,11 +145,11 @@ namespace ICSharpCode.ILSpy.AIChat
 			fullPrompt.AppendLine("Current selection:");
 			fullPrompt.AppendLine(context.Output);
 			fullPrompt.AppendLine();
-			fullPrompt.AppendLine("Selected decompilation (if available):");
-			fullPrompt.AppendLine(decompileContext.Output);
+			fullPrompt.AppendLine("Selected decompilation window (if available):");
+			fullPrompt.AppendLine(decompileWindowContext.Output);
 			fullPrompt.AppendLine();
-			fullPrompt.AppendLine("Loaded assemblies:");
-			fullPrompt.AppendLine(assemblyContext.Output);
+			fullPrompt.AppendLine("Loaded assemblies summary:");
+			fullPrompt.AppendLine(sparseAssemblyContext);
 			fullPrompt.AppendLine();
 			fullPrompt.AppendLine("User question:");
 			fullPrompt.AppendLine(prompt);
@@ -166,6 +170,7 @@ namespace ICSharpCode.ILSpy.AIChat
 			}
 			var state = string.Empty;
 			var step = 0;
+			var initialContext = await BuildInitialAutoContextSnapshotAsync(cancellationToken);
 
 			while (true)
 			{
@@ -177,7 +182,7 @@ namespace ICSharpCode.ILSpy.AIChat
 					await onProgress($"\n=== Step {step} ===\n");
 				}
 
-				var prompt = BuildAutoPrompt(goal, state, step);
+				var prompt = BuildAutoPrompt(goal, state, step, step == 1 ? initialContext : null);
 				var response = await codexClient.AskAsync(prompt, cancellationToken);
 				var modelText = AiChatToolCallParser.RemoveToolCallBlock(response);
 				if (onProgress != null && !string.IsNullOrWhiteSpace(modelText))
@@ -204,7 +209,7 @@ namespace ICSharpCode.ILSpy.AIChat
 					await onProgress($"Tool call: {toolCall.Name}\n");
 				}
 
-				var toolResult = await toolDispatcher.ExecuteAsync(toolCall.Name, toolCall.Mode, toolCall.Term, toolCall.Index, cancellationToken);
+				var toolResult = await toolDispatcher.ExecuteAsync(toolCall.Name, toolCall.Mode, toolCall.Term, toolCall.Index, toolCall.Arguments, cancellationToken);
 				if (onProgress != null)
 				{
 					await onProgress($"Tool result ({toolCall.Name}):\n");
@@ -240,15 +245,27 @@ namespace ICSharpCode.ILSpy.AIChat
 
 		private string BuildAutoPrompt(string goal, string state, int step)
 		{
+			return BuildAutoPrompt(goal, state, step, null);
+		}
+
+		private string BuildAutoPrompt(string goal, string state, int step, string? initialContext)
+		{
 			var builder = new StringBuilder();
 			builder.AppendLine("You are an autonomous ILSpy analysis agent.");
 			builder.AppendLine("Decide your next step. If you need a tool, output exactly one <tool_call> JSON block and nothing else.");
 			builder.AppendLine("If you can conclude, output final answer without tool_call block.");
+			builder.AppendLine("Prefer batch/window tools (search_many, decompile_many, read_selected_window) to reduce round-trips.");
 			builder.AppendLine();
 			builder.AppendLine(toolDispatcher.GetToolSpecText());
 			builder.AppendLine();
 			builder.AppendLine($"Goal: {goal}");
 			builder.AppendLine($"Current step: {step}");
+			if (!string.IsNullOrWhiteSpace(initialContext))
+			{
+				builder.AppendLine("Initial ILSpy context snapshot:");
+				builder.AppendLine(initialContext);
+			}
+
 			if (!string.IsNullOrWhiteSpace(state))
 			{
 				builder.AppendLine("Previous tool outputs:");
@@ -256,6 +273,52 @@ namespace ICSharpCode.ILSpy.AIChat
 			}
 
 			return builder.ToString();
+		}
+
+		private async Task<string> BuildInitialAutoContextSnapshotAsync(CancellationToken cancellationToken)
+		{
+			var selectedContext = await toolDispatcher.ExecuteAsync("selected", null, null, null, cancellationToken);
+			var windowContext = await toolDispatcher.ExecuteAsync("read_selected_window", null, null, null, CreateWindowArguments(startLine: 1, lineCount: AskSnapshotLineCount), cancellationToken);
+			var assembliesContext = await toolDispatcher.ExecuteAsync("assemblies", null, null, null, cancellationToken);
+
+			var builder = new StringBuilder();
+			builder.AppendLine("Current selection:");
+			builder.AppendLine(selectedContext.Output);
+			builder.AppendLine();
+			builder.AppendLine("Selected window:");
+			builder.AppendLine(windowContext.Output);
+			builder.AppendLine();
+			builder.AppendLine("Assemblies summary:");
+			builder.AppendLine(CreateSparseAssembliesSummary(assembliesContext.Output, AskAssemblySummaryLimit));
+			return builder.ToString().TrimEnd();
+		}
+
+		private static JsonElement? CreateWindowArguments(int startLine, int lineCount)
+		{
+			using var document = JsonDocument.Parse($"{{\"window\":{{\"startLine\":{startLine},\"lineCount\":{lineCount}}}}}");
+			return document.RootElement.Clone();
+		}
+
+		private static string CreateSparseAssembliesSummary(string assemblyOutput, int maxLines)
+		{
+			if (string.IsNullOrWhiteSpace(assemblyOutput))
+			{
+				return "<empty>";
+			}
+
+			var lines = assemblyOutput
+				.Split(["\r\n", "\n"], StringSplitOptions.None)
+				.Where(line => !string.IsNullOrWhiteSpace(line))
+				.ToArray();
+
+			if (lines.Length <= maxLines)
+			{
+				return assemblyOutput;
+			}
+
+			return string.Join(Environment.NewLine, lines.Take(maxLines))
+				+ Environment.NewLine
+				+ $"... ({lines.Length - maxLines} more assemblies omitted)";
 		}
 	}
 }

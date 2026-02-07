@@ -43,6 +43,18 @@ namespace ICSharpCode.ILSpy.AIChat
 	{
 		private const double StepDetailsMaxHeight = 300;
 		private static readonly string[] WaitingDots = [".", "..", "..."];
+		private static readonly Dictionary<string, string> FriendlyToolNames = new(StringComparer.OrdinalIgnoreCase) {
+			["assemblies"] = "List loaded assemblies",
+			["selected"] = "Read current selection",
+			["decompile"] = "Decompile current selection",
+			["read_selected_window"] = "Read selected code window",
+			["search"] = "Search symbols",
+			["search_many"] = "Batch symbol search",
+			["decompile_many"] = "Batch decompile targets",
+			["read_result_window"] = "Read search result window",
+			["open_result"] = "Open search result",
+			["analyze"] = "Run analyzer",
+		};
 
 		private AiChatPaneModel? observedModel;
 		private readonly Dictionary<string, bool> stepExpansionStates = new();
@@ -321,7 +333,7 @@ namespace ICSharpCode.ILSpy.AIChat
 			}
 			AddStepSection(panel, "Planning", step.Planning, false);
 			AddStepSection(panel, "Thinking", step.Thinking, false);
-			AddStepSection(panel, "Tool call", step.ToolCall, false);
+			AddStepSection(panel, "Action", HumanizeToolCall(step.ToolCall), false);
 			AddStepSection(panel, "Tool result", step.ToolResult, true);
 			AddStepSection(panel, "Notes", step.Other, false);
 
@@ -376,10 +388,39 @@ namespace ICSharpCode.ILSpy.AIChat
 		private static string BuildStepHeader(AutoStepRender step)
 		{
 			var summary = !string.IsNullOrWhiteSpace(step.ToolCall)
-				? step.ToolCall
+				? HumanizeToolCall(step.ToolCall)
 				: (!string.IsNullOrWhiteSpace(step.Thinking) ? ToSingleLine(step.Thinking, 72) : "planning...");
 
 			return $"Step {step.StepNumber} - {ToSingleLine(summary, 96)}";
+		}
+
+		private static string HumanizeToolCall(string toolCall)
+		{
+			if (string.IsNullOrWhiteSpace(toolCall))
+			{
+				return string.Empty;
+			}
+
+			var trimmed = toolCall.Trim();
+			var separatorIndex = trimmed.IndexOfAny([' ', '(']);
+			var toolName = separatorIndex >= 0 ? trimmed[..separatorIndex] : trimmed;
+			if (FriendlyToolNames.TryGetValue(toolName, out var friendlyName))
+			{
+				return friendlyName;
+			}
+
+			return HumanizeFallbackToolName(toolName);
+		}
+
+		private static string HumanizeFallbackToolName(string toolName)
+		{
+			var normalized = toolName.Replace('_', ' ').Replace('-', ' ').Trim();
+			if (string.IsNullOrWhiteSpace(normalized))
+			{
+				return toolName;
+			}
+
+			return char.ToUpperInvariant(normalized[0]) + normalized[1..];
 		}
 
 		private static bool TryParseAutoProgress(string text, out AutoProgressParseResult parsed)

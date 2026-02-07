@@ -45,6 +45,8 @@
     <Compile Include="AIChat\AiChatPaneXamlTests.cs" />
     <Compile Include="AIChat\AiChatSettingsPersistenceTests.cs" />
     <Compile Include="AIChat\AiChatToolCallParserTests.cs" />
+    <Compile Include="AIChat\AiChatToolDispatcherWindowingTests.cs" />
+    <Compile Include="AIChat\AiChatToolSpecTests.cs" />
     <Compile Include="Analyzers\ExportAnalyzerAttributeTests.cs" />
     <Compile Include="Analyzers\AnalyzerScopeTests.cs" />
     <Compile Include="Analyzers\MemberImplementsInterfaceAnalyzerTests.cs" />

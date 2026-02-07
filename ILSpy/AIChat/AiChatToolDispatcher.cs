@@ -17,12 +17,16 @@
 // DEALINGS IN THE SOFTWARE.
 
 using System;
+using System.Collections.Generic;
 using System.Composition;
 using System.Linq;
+using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
 using ICSharpCode.Decompiler;
+using ICSharpCode.Decompiler.TypeSystem;
 using ICSharpCode.ILSpy.Analyzers;
 using ICSharpCode.ILSpy.AssemblyTree;
 using ICSharpCode.ILSpy.Docking;
@@ -39,6 +43,12 @@ namespace ICSharpCode.ILSpy.AIChat
 	[Shared]
 	public sealed class AiChatToolDispatcher
 	{
+		private const int DefaultWindowStartLine = 1;
+		private const int DefaultWindowLineCount = 500;
+		private const int SearchMaxResults = 30;
+		private const int SearchManyMaxConcurrency = 3;
+		private const int DecompileManyMaxConcurrency = 2;
+
 		private readonly AssemblyTreeModel assemblyTreeModel;
 		private readonly AnalyzerTreeViewModel analyzerTreeViewModel;
 		private readonly DockWorkspace dockWorkspace;
@@ -59,16 +69,29 @@ namespace ICSharpCode.ILSpy.AIChat
 				"- assemblies()",
 				"- selected()",
 				"- decompile()",
+				"- read_selected_window(window?)",
 				"- search(mode, term)",
+				"- search_many(queries, maxResultsPerQuery?)",
+				"- decompile_many(targets, window?)",
+				"- read_result_window(index, window?)",
 				"- analyze()",
 				"- open_result(index)",
+				"Notes:",
+				"- window = {\"startLine\":1,\"lineCount\":500}",
+				"- search_many queries = [{\"mode\":\"type\",\"term\":\"PromoItemChecker\"}]",
+				"- decompile_many targets = [{\"kind\":\"search_index\",\"index\":1}] or [{\"kind\":\"query\",\"mode\":\"type\",\"term\":\"PromoItemChecker\"}]",
 				"Tool call format:",
 				"<tool_call>",
 				"{\"name\":\"search\",\"arguments\":{\"mode\":\"method\",\"term\":\"Find\"}}",
 				"</tool_call>");
 		}
 
-		public async Task<AiChatToolResult> ExecuteAsync(string toolName, string? mode, string? term, int? index, CancellationToken cancellationToken)
+		public Task<AiChatToolResult> ExecuteAsync(string toolName, string? mode, string? term, int? index, CancellationToken cancellationToken)
+		{
+			return ExecuteAsync(toolName, mode, term, index, null, cancellationToken);
+		}
+
+		public async Task<AiChatToolResult> ExecuteAsync(string toolName, string? mode, string? term, int? index, JsonElement? arguments, CancellationToken cancellationToken)
 		{
 			try
 			{
@@ -80,8 +103,16 @@ namespace ICSharpCode.ILSpy.AIChat
 						return new() { Success = true, Output = GetSelectedText() };
 					case "decompile":
 						return new() { Success = true, Output = DecompileSelectedNode() };
+					case "read_selected_window":
+						return new() { Success = true, Output = ReadSelectedWindow(arguments) };
 					case "search":
 						return new() { Success = true, Output = await SearchAsync(mode ?? "member", term ?? string.Empty, cancellationToken) };
+					case "search_many":
+						return new() { Success = true, Output = await SearchManyAsync(arguments, cancellationToken) };
+					case "decompile_many":
+						return new() { Success = true, Output = await DecompileManyAsync(arguments, cancellationToken) };
+					case "read_result_window":
+						return new() { Success = true, Output = ReadResultWindow(index, arguments) };
 					case "analyze":
 						return new() { Success = true, Output = AnalyzeSelected() };
 					case "open_result":
@@ -123,6 +154,23 @@ namespace ICSharpCode.ILSpy.AIChat
 
 		private string DecompileSelectedNode()
 		{
+			const int maxLength = 12_000;
+			var text = DecompileSelectedNodeText();
+			if (text.StartsWith("No selected node to decompile.", StringComparison.Ordinal))
+			{
+				return text;
+			}
+
+			if (text.Length > maxLength)
+			{
+				text = text.Substring(0, maxLength) + Environment.NewLine + "... [truncated]";
+			}
+
+			return text;
+		}
+
+		private string DecompileSelectedNodeText()
+		{
 			var node = assemblyTreeModel.SelectedNodes.FirstOrDefault();
 			if (node == null)
 			{
@@ -133,15 +181,7 @@ namespace ICSharpCode.ILSpy.AIChat
 			var options = dockWorkspace.ActiveTabPage.CreateDecompilationOptions();
 			options.FullDecompilation = false;
 			node.Decompile(assemblyTreeModel.CurrentLanguage, output, options);
-
-			const int maxLength = 12_000;
-			var text = output.ToString();
-			if (text.Length > maxLength)
-			{
-				text = text.Substring(0, maxLength) + Environment.NewLine + "... [truncated]";
-			}
-
-			return text;
+			return output.ToString();
 		}
 
 		private async Task<string> SearchAsync(string mode, string term, CancellationToken cancellationToken)
@@ -158,16 +198,7 @@ namespace ICSharpCode.ILSpy.AIChat
 				return "Current language version is unavailable.";
 			}
 
-			var results = await searchService.SearchAsync(
-				assemblyTreeModel.AssemblyList,
-				assemblyTreeModel.CurrentLanguage,
-				languageVersion,
-				mode,
-				term,
-				maxResults: 30,
-				cancellationToken);
-
-			lastSearchResults = results.ToArray();
+			lastSearchResults = await SearchCoreAsync(mode, term, SearchMaxResults, cancellationToken);
 			if (lastSearchResults.Length == 0)
 			{
 				return $"No results for '{term}' in mode '{mode}'.";
@@ -175,6 +206,672 @@ namespace ICSharpCode.ILSpy.AIChat
 
 			return string.Join(Environment.NewLine, lastSearchResults.Select((result, i) => $"{i + 1}. {result.Name} | {result.Location} | {result.Assembly}"));
 		}
+
+		private async Task<SearchResult[]> SearchCoreAsync(string mode, string term, int maxResults, CancellationToken cancellationToken)
+		{
+			var languageVersion = assemblyTreeModel.CurrentLanguageVersion;
+			if (languageVersion == null)
+			{
+				return [];
+			}
+
+			var results = await searchService.SearchAsync(
+				assemblyTreeModel.AssemblyList,
+				assemblyTreeModel.CurrentLanguage,
+				languageVersion,
+				mode,
+				term,
+				maxResults,
+				cancellationToken);
+
+			return results.ToArray();
+		}
+
+		private string ReadSelectedWindow(JsonElement? arguments)
+		{
+			if (!TryParseWindowArguments(arguments, out var window, out var parseError))
+			{
+				return parseError;
+			}
+
+			var selected = GetSelectedText();
+			var rawText = DecompileSelectedNodeText();
+			if (rawText.StartsWith("No selected node to decompile.", StringComparison.Ordinal))
+			{
+				return rawText;
+			}
+
+			var slice = SliceTextWindow(rawText, window.StartLine, window.LineCount);
+			var builder = new StringBuilder();
+			builder.AppendLine("Selected summary:");
+			builder.AppendLine(selected);
+			builder.AppendLine();
+			builder.AppendLine("Selected content window:");
+			builder.Append(FormatWindow(slice));
+			return builder.ToString();
+		}
+
+		private async Task<string> SearchManyAsync(JsonElement? arguments, CancellationToken cancellationToken)
+		{
+			if (!TryParseSearchManyArguments(arguments, out var queries, out var maxResultsPerQuery, out var parseError))
+			{
+				return parseError;
+			}
+
+			var semaphore = new SemaphoreSlim(SearchManyMaxConcurrency);
+			var tasks = queries
+				.Select((query, queryIndex) => ExecuteSearchManyQueryAsync(query, queryIndex, maxResultsPerQuery, semaphore, cancellationToken))
+				.ToArray();
+
+			var queryResults = await Task.WhenAll(tasks);
+			Array.Sort(queryResults, static (left, right) => left.QueryIndex.CompareTo(right.QueryIndex));
+
+			lastSearchResults = queryResults.SelectMany(item => item.Results).ToArray();
+
+			var builder = new StringBuilder();
+			var globalIndex = 1;
+			foreach (var result in queryResults)
+			{
+				builder.AppendLine($"[query {result.QueryIndex + 1}] mode='{result.Query.Mode}' term='{result.Query.Term}'");
+				if (!string.IsNullOrWhiteSpace(result.Error))
+				{
+					builder.AppendLine($"error: {result.Error}");
+					builder.AppendLine();
+					continue;
+				}
+
+				if (result.Results.Length == 0)
+				{
+					builder.AppendLine("hits: 0");
+					builder.AppendLine();
+					continue;
+				}
+
+				builder.AppendLine($"hits: {result.Results.Length}");
+				foreach (var (searchResult, localIndex) in result.Results.Select((item, idx) => (item, idx + 1)))
+				{
+					builder.AppendLine($"- {localIndex}. [global {globalIndex}] {searchResult.Name} | {searchResult.Location} | {searchResult.Assembly}");
+					globalIndex++;
+				}
+
+				builder.AppendLine();
+			}
+
+			if (lastSearchResults.Length == 0)
+			{
+				builder.AppendLine("No results in search_many.");
+			}
+
+			return builder.ToString().TrimEnd();
+		}
+
+		private async Task<string> DecompileManyAsync(JsonElement? arguments, CancellationToken cancellationToken)
+		{
+			if (!TryParseDecompileManyArguments(arguments, out var requests, out var window, out var parseError))
+			{
+				return parseError;
+			}
+
+			var directJobs = new List<DecompileJob>();
+			var immediateMessages = new List<string>();
+			var querySearchResults = new List<SearchResult>();
+
+			for (var i = 0; i < requests.Count; i++)
+			{
+				var request = requests[i];
+				if (request.Kind == "search_index")
+				{
+					if (request.Index is not >= 1)
+					{
+						immediateMessages.Add($"target {i + 1}: invalid search_index (must be >= 1).");
+						continue;
+					}
+
+					var searchIndex = request.Index.Value - 1;
+					if (searchIndex < 0 || searchIndex >= lastSearchResults.Length)
+					{
+						immediateMessages.Add($"target {i + 1}: search_index {request.Index.Value} out of range (current: {lastSearchResults.Length}).");
+						continue;
+					}
+
+					if (!TryResolveEntity(lastSearchResults[searchIndex], out var entity, out var resolveError))
+					{
+						immediateMessages.Add($"target {i + 1}: {resolveError}");
+						continue;
+					}
+
+					directJobs.Add(new($"target {i + 1} (search_index={request.Index.Value})", entity));
+					continue;
+				}
+
+				if (request.Kind == "query")
+				{
+					if (string.IsNullOrWhiteSpace(request.Mode) || string.IsNullOrWhiteSpace(request.Term))
+					{
+						immediateMessages.Add($"target {i + 1}: query requires mode and term.");
+						continue;
+					}
+
+					var hits = await SearchCoreAsync(request.Mode, request.Term, SearchMaxResults, cancellationToken);
+					if (hits.Length == 0)
+					{
+						immediateMessages.Add($"target {i + 1}: query mode='{request.Mode}' term='{request.Term}' returned 0 hits.");
+						continue;
+					}
+
+					querySearchResults.AddRange(hits);
+					if (hits.Length > 1)
+					{
+						var hitLines = hits.Take(8).Select((item, idx) => $"  - {idx + 1}. {item.Name} | {item.Location} | {item.Assembly}");
+						var multiMessage = string.Join(Environment.NewLine, new[] {
+							$"target {i + 1}: query mode='{request.Mode}' term='{request.Term}' has {hits.Length} hits. refine query or use search_index.",
+							"candidates:",
+						}.Concat(hitLines));
+						immediateMessages.Add(multiMessage);
+						continue;
+					}
+
+					if (!TryResolveEntity(hits[0], out var singleEntity, out var singleError))
+					{
+						immediateMessages.Add($"target {i + 1}: {singleError}");
+						continue;
+					}
+
+					directJobs.Add(new($"target {i + 1} (query mode='{request.Mode}' term='{request.Term}')", singleEntity));
+					continue;
+				}
+
+				immediateMessages.Add($"target {i + 1}: unsupported kind '{request.Kind}'.");
+			}
+
+			if (querySearchResults.Count > 0)
+			{
+				lastSearchResults = querySearchResults.ToArray();
+			}
+
+			var decompiledResults = await ExecuteDecompileJobsAsync(directJobs, window, cancellationToken);
+
+			var builder = new StringBuilder();
+			if (immediateMessages.Count > 0)
+			{
+				builder.AppendLine("Resolution summary:");
+				foreach (var message in immediateMessages)
+				{
+					builder.AppendLine($"- {message}");
+				}
+				builder.AppendLine();
+			}
+
+			if (decompiledResults.FallbackMessage != null)
+			{
+				builder.AppendLine(decompiledResults.FallbackMessage);
+				builder.AppendLine();
+			}
+
+			if (decompiledResults.Items.Count == 0)
+			{
+				builder.AppendLine("No decompilation output produced.");
+				return builder.ToString().TrimEnd();
+			}
+
+			builder.AppendLine("Decompile windows:");
+			for (var i = 0; i < decompiledResults.Items.Count; i++)
+			{
+				var item = decompiledResults.Items[i];
+				builder.AppendLine($"[{i + 1}] {item.Label}");
+				builder.AppendLine($"entity: {item.EntityDisplayName}");
+				builder.Append(FormatWindow(item.Slice));
+				if (i < decompiledResults.Items.Count - 1)
+				{
+					builder.AppendLine();
+					builder.AppendLine();
+				}
+			}
+
+			return builder.ToString().TrimEnd();
+		}
+
+		private string ReadResultWindow(int? index, JsonElement? arguments)
+		{
+			if (!TryParseWindowArguments(arguments, out var window, out var parseWindowError))
+			{
+				return parseWindowError;
+			}
+
+			var resolvedIndex = ResolveSearchResultIndex(index, arguments);
+			if (resolvedIndex is not >= 1)
+			{
+				return "read_result_window(index, window?): index must be >= 1.";
+			}
+
+			var searchResultIndex = resolvedIndex.Value - 1;
+			if (searchResultIndex < 0 || searchResultIndex >= lastSearchResults.Length)
+			{
+				return $"Search result index out of range. Current results: {lastSearchResults.Length}.";
+			}
+
+			var result = lastSearchResults[searchResultIndex];
+			if (!TryResolveEntity(result, out var entity, out var resolveError))
+			{
+				return resolveError;
+			}
+
+			var text = DecompileEntity(entity, CancellationToken.None);
+			var slice = SliceTextWindow(text, window.StartLine, window.LineCount);
+
+			var builder = new StringBuilder();
+			builder.AppendLine($"result #{resolvedIndex}: {result.Name} | {result.Location} | {result.Assembly}");
+			builder.AppendLine($"entity: {entity.FullName}");
+			builder.Append(FormatWindow(slice));
+
+			if (slice.HasMore)
+			{
+				builder.AppendLine();
+				builder.AppendLine($"next suggestion: read_result_window(index={resolvedIndex}, window={{\"startLine\":{slice.NextStartLine},\"lineCount\":{window.LineCount}}})");
+			}
+
+			return builder.ToString().TrimEnd();
+		}
+
+		private async Task<SearchManyQueryResult> ExecuteSearchManyQueryAsync(SearchQuery query, int queryIndex, int maxResultsPerQuery, SemaphoreSlim semaphore, CancellationToken cancellationToken)
+		{
+			await semaphore.WaitAsync(cancellationToken);
+			try
+			{
+				var results = await SearchCoreAsync(query.Mode, query.Term, maxResultsPerQuery, cancellationToken);
+				return new(queryIndex, query, results, null);
+			}
+			catch (Exception ex)
+			{
+				return new(queryIndex, query, [], ex.Message);
+			}
+			finally
+			{
+				semaphore.Release();
+			}
+		}
+
+		private async Task<DecompileExecutionResult> ExecuteDecompileJobsAsync(List<DecompileJob> jobs, WindowRequest window, CancellationToken cancellationToken)
+		{
+			if (jobs.Count == 0)
+			{
+				return new(new List<DecompileWindowResult>(), null);
+			}
+
+			if (jobs.Count == 1)
+			{
+				var serialItems = await ExecuteDecompileJobsSerialAsync(jobs, window, cancellationToken);
+				return new(serialItems, null);
+			}
+
+			try
+			{
+				var parallelItems = await ExecuteDecompileJobsParallelAsync(jobs, window, cancellationToken);
+				return new(parallelItems, null);
+			}
+			catch (Exception ex)
+			{
+				var fallbackItems = await ExecuteDecompileJobsSerialAsync(jobs, window, cancellationToken);
+				return new(fallbackItems, $"Parallel decompile failed, fell back to serial: {ex.Message}");
+			}
+		}
+
+		private async Task<List<DecompileWindowResult>> ExecuteDecompileJobsParallelAsync(List<DecompileJob> jobs, WindowRequest window, CancellationToken cancellationToken)
+		{
+			var semaphore = new SemaphoreSlim(DecompileManyMaxConcurrency);
+			var tasks = jobs
+				.Select(async (job, index) => {
+					await semaphore.WaitAsync(cancellationToken);
+					try
+					{
+						return await Task.Run(() => DecompileJobToResult(job, index, window, cancellationToken), cancellationToken);
+					}
+					finally
+					{
+						semaphore.Release();
+					}
+				})
+				.ToArray();
+
+			var results = await Task.WhenAll(tasks);
+			return results.OrderBy(item => item.Order).ToList();
+		}
+
+		private Task<List<DecompileWindowResult>> ExecuteDecompileJobsSerialAsync(List<DecompileJob> jobs, WindowRequest window, CancellationToken cancellationToken)
+		{
+			var results = new List<DecompileWindowResult>(jobs.Count);
+			for (var i = 0; i < jobs.Count; i++)
+			{
+				cancellationToken.ThrowIfCancellationRequested();
+				results.Add(DecompileJobToResult(jobs[i], i, window, cancellationToken));
+			}
+
+			return Task.FromResult(results);
+		}
+
+		private DecompileWindowResult DecompileJobToResult(DecompileJob job, int order, WindowRequest window, CancellationToken cancellationToken)
+		{
+			var text = DecompileEntity(job.Entity, cancellationToken);
+			var slice = SliceTextWindow(text, window.StartLine, window.LineCount);
+			return new(order, job.Label, job.Entity.FullName, slice);
+		}
+
+		private string DecompileEntity(IEntity entity, CancellationToken cancellationToken)
+		{
+			var options = dockWorkspace.ActiveTabPage?.CreateDecompilationOptions();
+			if (options == null)
+			{
+				throw new InvalidOperationException("No active tab page for decompilation options.");
+			}
+
+			options.FullDecompilation = false;
+			options.CancellationToken = cancellationToken;
+
+			var output = new PlainTextOutput();
+			var language = assemblyTreeModel.CurrentLanguage;
+			switch (entity)
+			{
+				case ITypeDefinition type:
+					language.DecompileType(type, output, options);
+					break;
+				case IMethod method:
+					language.DecompileMethod(method, output, options);
+					break;
+				case IField field:
+					language.DecompileField(field, output, options);
+					break;
+				case IProperty property:
+					language.DecompileProperty(property, output, options);
+					break;
+				case IEvent @event:
+					language.DecompileEvent(@event, output, options);
+					break;
+				default:
+					throw new InvalidOperationException($"Unsupported entity type '{entity.GetType().Name}' for decompilation.");
+			}
+
+			return output.ToString();
+		}
+
+		private static bool TryResolveEntity(SearchResult searchResult, out IEntity entity, out string error)
+		{
+			if (searchResult.Reference is IEntity typedEntity)
+			{
+				entity = typedEntity;
+				error = string.Empty;
+				return true;
+			}
+
+			entity = null!;
+			error = $"result '{searchResult.Name}' is not an entity and cannot be decompiled in batch mode.";
+			return false;
+		}
+
+		private static int? ResolveSearchResultIndex(int? index, JsonElement? arguments)
+		{
+			if (index is >= 1)
+			{
+				return index;
+			}
+
+			if (arguments is not { ValueKind: JsonValueKind.Object } argumentObject)
+			{
+				return index;
+			}
+
+			if (argumentObject.TryGetProperty("index", out var indexElement)
+				&& indexElement.ValueKind == JsonValueKind.Number
+				&& indexElement.TryGetInt32(out var parsedIndex))
+			{
+				return parsedIndex;
+			}
+
+			return index;
+		}
+
+		private static string FormatWindow(TextWindowSlice slice)
+		{
+			var nextStartLineText = slice.HasMore ? slice.NextStartLine.ToString() : "<none>";
+			var builder = new StringBuilder();
+			builder.AppendLine($"window: startLine={slice.StartLine}, returnedLineCount={slice.ReturnedLineCount}, totalLines={slice.TotalLines}, hasMore={slice.HasMore.ToString().ToLowerInvariant()}, nextStartLine={nextStartLineText}");
+			builder.AppendLine("content:");
+			builder.Append(string.IsNullOrEmpty(slice.Text) ? "<empty>" : slice.Text);
+			return builder.ToString();
+		}
+
+		internal static TextWindowSlice SliceTextWindow(string text, int startLine, int lineCount)
+		{
+			var normalizedStartLine = startLine < 1 ? DefaultWindowStartLine : startLine;
+			var normalizedLineCount = lineCount < 1 ? DefaultWindowLineCount : lineCount;
+
+			var lines = new List<string>();
+			using (var reader = new System.IO.StringReader(text ?? string.Empty))
+			{
+				string? line;
+				while ((line = reader.ReadLine()) != null)
+				{
+					lines.Add(line);
+				}
+			}
+
+			var totalLines = lines.Count;
+			if (totalLines == 0)
+			{
+				return new(normalizedStartLine, 0, 0, false, -1, string.Empty);
+			}
+
+			var startIndex = normalizedStartLine - 1;
+			if (startIndex >= totalLines)
+			{
+				return new(normalizedStartLine, 0, totalLines, false, -1, string.Empty);
+			}
+
+			var returnedLineCount = Math.Min(normalizedLineCount, totalLines - startIndex);
+			var windowLines = lines.Skip(startIndex).Take(returnedLineCount);
+			var windowText = string.Join(Environment.NewLine, windowLines);
+			var hasMore = startIndex + returnedLineCount < totalLines;
+			var nextStartLine = hasMore ? normalizedStartLine + returnedLineCount : -1;
+
+			return new(normalizedStartLine, returnedLineCount, totalLines, hasMore, nextStartLine, windowText);
+		}
+
+		private static bool TryParseWindowArguments(JsonElement? arguments, out WindowRequest window, out string error)
+		{
+			window = new(DefaultWindowStartLine, DefaultWindowLineCount);
+			error = string.Empty;
+
+			if (arguments is not { ValueKind: JsonValueKind.Object } argumentObject)
+			{
+				return true;
+			}
+
+			var source = argumentObject;
+			if (argumentObject.TryGetProperty("window", out var windowElement))
+			{
+				if (windowElement.ValueKind != JsonValueKind.Object)
+				{
+					error = "window must be an object with startLine/lineCount.";
+					return false;
+				}
+
+				source = windowElement;
+			}
+
+			if (source.TryGetProperty("startLine", out var startLineElement))
+			{
+				if (startLineElement.ValueKind != JsonValueKind.Number || !startLineElement.TryGetInt32(out var startLineValue))
+				{
+					error = "startLine must be an integer.";
+					return false;
+				}
+
+				window = window with { StartLine = Math.Max(DefaultWindowStartLine, startLineValue) };
+			}
+
+			if (source.TryGetProperty("lineCount", out var lineCountElement))
+			{
+				if (lineCountElement.ValueKind != JsonValueKind.Number || !lineCountElement.TryGetInt32(out var lineCountValue))
+				{
+					error = "lineCount must be an integer.";
+					return false;
+				}
+
+				window = window with { LineCount = Math.Max(1, lineCountValue) };
+			}
+
+			return true;
+		}
+
+		private static bool TryParseSearchManyArguments(JsonElement? arguments, out List<SearchQuery> queries, out int maxResultsPerQuery, out string error)
+		{
+			queries = [];
+			maxResultsPerQuery = SearchMaxResults;
+			error = string.Empty;
+
+			if (arguments is not { ValueKind: JsonValueKind.Object } argumentObject)
+			{
+				error = "Usage: search_many(queries, maxResultsPerQuery?).";
+				return false;
+			}
+
+			if (!argumentObject.TryGetProperty("queries", out var queriesElement) || queriesElement.ValueKind != JsonValueKind.Array)
+			{
+				error = "search_many requires queries array.";
+				return false;
+			}
+
+			foreach (var queryElement in queriesElement.EnumerateArray())
+			{
+				if (queryElement.ValueKind != JsonValueKind.Object)
+				{
+					error = "Each query must be an object with mode and term.";
+					return false;
+				}
+
+				if (!queryElement.TryGetProperty("term", out var termElement) || termElement.ValueKind != JsonValueKind.String)
+				{
+					error = "Each query requires string term.";
+					return false;
+				}
+
+				var mode = queryElement.TryGetProperty("mode", out var modeElement) && modeElement.ValueKind == JsonValueKind.String
+					? modeElement.GetString() ?? "member"
+					: "member";
+
+				var term = termElement.GetString() ?? string.Empty;
+				if (string.IsNullOrWhiteSpace(term))
+				{
+					error = "Each query term must be non-empty.";
+					return false;
+				}
+
+				queries.Add(new(mode, term));
+			}
+
+			if (queries.Count == 0)
+			{
+				error = "queries must not be empty.";
+				return false;
+			}
+
+			if (argumentObject.TryGetProperty("maxResultsPerQuery", out var maxElement))
+			{
+				if (maxElement.ValueKind != JsonValueKind.Number || !maxElement.TryGetInt32(out var parsedMax))
+				{
+					error = "maxResultsPerQuery must be an integer.";
+					return false;
+				}
+
+				maxResultsPerQuery = Math.Max(1, parsedMax);
+			}
+
+			return true;
+		}
+
+		private static bool TryParseDecompileManyArguments(JsonElement? arguments, out List<DecompileTargetRequest> targets, out WindowRequest window, out string error)
+		{
+			targets = [];
+			window = new(DefaultWindowStartLine, DefaultWindowLineCount);
+			error = string.Empty;
+
+			if (arguments is not { ValueKind: JsonValueKind.Object } argumentObject)
+			{
+				error = "Usage: decompile_many(targets, window?).";
+				return false;
+			}
+
+			if (!argumentObject.TryGetProperty("targets", out var targetsElement) || targetsElement.ValueKind != JsonValueKind.Array)
+			{
+				error = "decompile_many requires targets array.";
+				return false;
+			}
+
+			if (!TryParseWindowArguments(arguments, out window, out error))
+			{
+				return false;
+			}
+
+			foreach (var targetElement in targetsElement.EnumerateArray())
+			{
+				if (targetElement.ValueKind != JsonValueKind.Object)
+				{
+					error = "Each target must be an object.";
+					return false;
+				}
+
+				if (!targetElement.TryGetProperty("kind", out var kindElement) || kindElement.ValueKind != JsonValueKind.String)
+				{
+					error = "Each target requires kind ('search_index' or 'query').";
+					return false;
+				}
+
+				var kind = kindElement.GetString() ?? string.Empty;
+				int? index = null;
+				string? mode = null;
+				string? term = null;
+
+				if (targetElement.TryGetProperty("index", out var indexElement) && indexElement.ValueKind == JsonValueKind.Number && indexElement.TryGetInt32(out var parsedIndex))
+				{
+					index = parsedIndex;
+				}
+
+				if (targetElement.TryGetProperty("mode", out var modeElement) && modeElement.ValueKind == JsonValueKind.String)
+				{
+					mode = modeElement.GetString();
+				}
+
+				if (targetElement.TryGetProperty("term", out var termElement) && termElement.ValueKind == JsonValueKind.String)
+				{
+					term = termElement.GetString();
+				}
+
+				targets.Add(new(kind, index, mode, term));
+			}
+
+			if (targets.Count == 0)
+			{
+				error = "targets must not be empty.";
+				return false;
+			}
+
+			return true;
+		}
+
+		private sealed record SearchQuery(string Mode, string Term);
+
+		private sealed record SearchManyQueryResult(int QueryIndex, SearchQuery Query, SearchResult[] Results, string? Error);
+
+		private sealed record WindowRequest(int StartLine, int LineCount);
+
+		private sealed record DecompileTargetRequest(string Kind, int? Index, string? Mode, string? Term);
+
+		private sealed record DecompileJob(string Label, IEntity Entity);
+
+		private sealed record DecompileWindowResult(int Order, string Label, string EntityDisplayName, TextWindowSlice Slice);
+
+		private sealed record DecompileExecutionResult(List<DecompileWindowResult> Items, string? FallbackMessage);
+
+		internal readonly record struct TextWindowSlice(int StartLine, int ReturnedLineCount, int TotalLines, bool HasMore, int NextStartLine, string Text);
 
 		private string AnalyzeSelected()
 		{

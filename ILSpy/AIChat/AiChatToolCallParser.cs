@@ -27,6 +27,8 @@ namespace ICSharpCode.ILSpy.AIChat
 	{
 		public required string Name { get; init; }
 
+		public JsonElement? Arguments { get; init; }
+
 		public string? Mode { get; init; }
 
 		public string? Term { get; init; }
@@ -75,27 +77,34 @@ namespace ICSharpCode.ILSpy.AIChat
 				string? mode = null;
 				string? term = null;
 				int? index = null;
+				JsonElement? clonedArguments = null;
 
-				if (root.TryGetProperty("arguments", out var arguments) && arguments.ValueKind == JsonValueKind.Object)
+				if (root.TryGetProperty("arguments", out var arguments))
 				{
-					if (arguments.TryGetProperty("mode", out var modeElement) && modeElement.ValueKind == JsonValueKind.String)
-					{
-						mode = modeElement.GetString();
-					}
+					clonedArguments = arguments.Clone();
 
-					if (arguments.TryGetProperty("term", out var termElement) && termElement.ValueKind == JsonValueKind.String)
+					if (arguments.ValueKind == JsonValueKind.Object)
 					{
-						term = termElement.GetString();
-					}
+						if (arguments.TryGetProperty("mode", out var modeElement) && modeElement.ValueKind == JsonValueKind.String)
+						{
+							mode = modeElement.GetString();
+						}
 
-					if (arguments.TryGetProperty("index", out var indexElement) && indexElement.ValueKind == JsonValueKind.Number && indexElement.TryGetInt32(out var parsed))
-					{
-						index = parsed;
+						if (arguments.TryGetProperty("term", out var termElement) && termElement.ValueKind == JsonValueKind.String)
+						{
+							term = termElement.GetString();
+						}
+
+						if (arguments.TryGetProperty("index", out var indexElement) && indexElement.ValueKind == JsonValueKind.Number && indexElement.TryGetInt32(out var parsed))
+						{
+							index = parsed;
+						}
 					}
 				}
 
 				return new() {
 					Name = name,
+					Arguments = clonedArguments,
 					Mode = mode,
 					Term = term,
 					Index = index,
